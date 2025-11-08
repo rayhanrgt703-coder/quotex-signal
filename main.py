@@ -67,23 +67,23 @@ symbol_state: Dict[str, Dict] = {
 }
 
 # Simple frontend with mode toggle
-HTML = """<!doctype html>
+HTML = f"""<!doctype html>
 <html>
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>Quotex Signal — High Accuracy</title>
 <style>
-body{font-family:system-ui,Arial;background:#071021;color:#e6f0f4;padding:12px}
-h1{color:#6ee7b7;text-align:center}
-.controls{display:flex;justify-content:center;gap:8px;margin-bottom:10px}
-.btn{padding:8px 12px;border-radius:8px;background:#0b2a33;border:1px solid #123;cursor:pointer}
-.btn.active{background:#0f3f2f}
-.table{width:100%;max-width:980px;margin:0 auto;border-collapse:collapse}
-th,td{padding:8px;border:1px solid #123;text-align:center}
-th{background:#0b2433}
-td{background:#07202b}
-.small{font-size:13px;color:#9fb3c8}
+body{{font-family:system-ui,Arial;background:#071021;color:#e6f0f4;padding:12px}}
+h1{{color:#6ee7b7;text-align:center}}
+.controls{{display:flex;justify-content:center;gap:8px;margin-bottom:10px}}
+.btn{{padding:8px 12px;border-radius:8px;background:#0b2a33;border:1px solid #123;cursor:pointer}}
+.btn.active{{background:#0f3f2f}}
+.table{{width:100%;max-width:980px;margin:0 auto;border-collapse:collapse}}
+th,td{{padding:8px;border:1px solid #123;text-align:center}}
+th{{background:#0b2433}}
+td{{background:#07202b}}
+.small{{font-size:13px;color:#9fb3c8}}
 </style>
 </head>
 <body>
@@ -103,29 +103,27 @@ td{background:#07202b}
 const ws = new WebSocket((location.protocol==='https:'?'wss://':'ws://') + location.host + '/ws');
 const body = document.getElementById('body');
 ws.onopen = ()=>console.log('ws open');
-ws.onmessage = (ev)=> {
+ws.onmessage = (ev)=> {{
   const data = JSON.parse(ev.data);
   body.innerHTML = '';
-  Object.keys(data).forEach(sym=>{
+  Object.keys(data).forEach(sym=>{{
     const s = data[sym];
     const tr = document.createElement('tr');
     const conf = (s.confidence||0).toFixed(1) + '%';
     let cls = '';
-    if(s.confidence >= %d) cls='style="color:#00ff88;font-weight:700"';
-    else if(s.confidence >= %d) cls='style="color:#ffcc66"';
+    if(s.confidence >= {int(HIGH_CONFIDENCE_THRESHOLD)}) cls='style="color:#00ff88;font-weight:700"';
+    else if(s.confidence >= {int(MEDIUM_CONFIDENCE)}) cls='style="color:#ffcc66"';
     else cls='';
-    const inds = Object.entries(s.indicators||{}).map(([k,v])=>k+':'+(typeof v==='number'?v.toFixed(2):v)).join(', ');
-    tr.innerHTML = `<td>${sym}</td><td>${s.last_close===null?'-':s.last_close}</td><td ${cls}>${s.signal}</td><td>${conf}</td><td class="small">${inds}</td><td class="small">${s.last_updated||'-'}</td>`;
+    const inds = Object.entries(s.indicators||{{}}).map(([k,v])=>k+':'+(typeof v==='number'?v.toFixed(2):v)).join(', ');
+    tr.innerHTML = `<td>${{sym}}</td><td>${{s.last_close===null?'-':s.last_close}}</td><td ${{cls}}>${{s.signal}}</td><td>${{conf}}</td><td class="small">${{inds}}</td><td class="small">${{s.last_updated||'-'}}</td>`;
     body.appendChild(tr);
-  });
-};
-
-document.getElementById('fastBtn').onclick = ()=>{document.getElementById('fast').style.display='block'; document.getElementById('pro').style.display='none'; this.classList.add('active'); document.getElementById('proBtn').classList.remove('active');}
-document.getElementById('proBtn').onclick = ()=>{document.getElementById('fast').style.display='none'; document.getElementById('pro').style.display='block'; this.classList.add('active'); document.getElementById('fastBtn').classList.remove('active');}
+  }});
+}};
 </script>
 </body>
 </html>
-""" % (int(HIGH_CONFIDENCE_THRESHOLD), int(MEDIUM_CONFIDENCE))
+"""
+ % (int(HIGH_CONFIDENCE_THRESHOLD), int(MEDIUM_CONFIDENCE))
 
 
 @app.get("/", response_class=HTMLResponse)
