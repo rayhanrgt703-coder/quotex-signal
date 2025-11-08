@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: quotex-signal
+    env: python
+    plan: free
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python main.py"
+    envVars:
+      - key: FINNHUB_API_KEY
+        value: ""
