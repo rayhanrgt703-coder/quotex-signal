@@ -1,10 +1,10 @@
 services:
   - type: web
-    name: quotex-signal-app
+    name: smart-pro-signal-v2
     env: python
-    buildCommand: "pip install -r requirements.txt"
-    startCommand: "uvicorn main:app --host 0.0.0.0 --port 10000"
     plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port 10000
     envVars:
       - key: FINNHUB_API_KEY
-        sync: false
+        value: d444os1r01qge0d0g670d444os1r01qge0d0g67g
