@@ -1,41 +1,46 @@
-# 💹 Smart Pro Signal v3.0 (Real-Time 1m Candle) — Twelve Data
+# 💹 Smart Pro Signal v4.0 — High Accuracy Real-Time
 
-Smart Pro Signal v3.0 analyzes 1-minute candles and combines candlestick patterns + indicators
-(SMA, RSI, Bollinger Bands, MACD) to produce high-confidence trading signals.
+Live Forex/Quotex signal analyzer with:
+✅ Candle patterns  
+✅ Trend confirmation  
+✅ MACD momentum  
+✅ RSI strength  
+✅ Weighted confidence score  
 
-## Features
-- Real-time 1-minute candles (Twelve Data)
-- Candlestick patterns: Doji, Hammer, Engulfing, Inverted Hammer, Strong Bull/Bear
-- Indicators: SMA(5,10), RSI(14), Bollinger Bands(20,2), MACD(12,26,9)
-- Only shows signals with confidence ≥ 85%
-- Auto-refresh UI + history of previous sure-signals
-- Ready to deploy on Render
+---
 
-## Files
-- `main.py` — server & logic
-- `requirements.txt` — Python packages
-- `render.yaml` — Render deployment config
-- `README.md` — this file
+## 🚀 Features
+- Live 1-minute analysis
+- Auto-updates every candle close
+- 80%+ confidence only shown as sure signals
+- Previous signals history (last 50)
+- Extremely lightweight UI
+- Fully automatic
 
-## Setup (Render)
-1. Create a Twelve Data account: https://twelvedata.com → get API key.
-2. Create a new Web Service on Render.
-3. Upload repo or connect GitHub (include `main.py`, `requirements.txt`, `render.yaml`).
-4. Add Environment Variable:
-   - Key: `TWELVE_DATA_API_KEY`
-   - Value: your twelve data API key
-5. Deploy. App will be available at the Render URL.
+---
 
-## Run locally
-1. Create `.env` file:
-2. Install:
-3. Run:
-4. Open `http://127.0.0.1:8000`
+## 🔧 Setup on Render
+1. Create new Web Service  
+2. Upload files:
+   - main.py
+   - requirements.txt
+   - render.yaml
+3. Add environment variable:
+   - `TWELVE_DATA_API_KEY`
+4. Deploy
 
-## Notes & Tips
-- The code aligns to candle-close: it fetches right after each 1-minute candle finishes to compute signals at the close.
-- Twelve Data free tier provides frequent updates; some tiny delay may occur. For full enterprise-grade low-latency, consider a paid data feed.
-- If you want push-notifications (Telegram/Email) or WebSocket/live front-end, ask me and I’ll add it.
+---
 
-## License
-Use at your own risk. Signals are algorithmic suggestions, not financial advice.
+## ✅ Accuracy
+- Sure signals appear when indicators strongly match
+- Confidence: 80%–99%
+- Real-time candle-aligned updates
+
+---
+
+## ✅ Data Source
+- TwelveData API (free)
+
+---
+
+Developed for high accuracy and real-time fast updates.
