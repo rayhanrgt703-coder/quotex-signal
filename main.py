@@ -1,23 +1,28 @@
-from fastapi import FastAPI, WebSocket
+from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
-import asyncio, requests, datetime, statistics
+import asyncio, requests, datetime, statistics, os
 
 app = FastAPI()
 
-# ========= CONFIG =========
-API_KEY = "d444os1r01qge0d0g670d444os1r01qge0d0g67g"
+# ✅ API KEY (from Render or .env)
+API_KEY = os.getenv("FINNHUB_API_KEY")
+
 SYMBOLS = [
     "OANDA:EUR_USD", "OANDA:GBP_USD",
     "OANDA:USD_JPY", "OANDA:USD_CAD",
     "OANDA:AUD_USD", "OANDA:USD_CHF"
 ]
-INTERVAL = "1"
-# ==========================
 
-symbol_state = {sym: {
-    "last": "-", "signal": "WAIT", "confidence": 0.0,
-    "pattern": "-", "updated": "-"
-} for sym in SYMBOLS}
+INTERVAL = "1"
+
+# ✅ Live state
+symbol_state = {
+    sym: {"last": "-", "signal": "WAIT", "confidence": 0.0, "pattern": "-", "updated": "-"}
+    for sym in SYMBOLS
+}
+
+# ✅ History storage (last 300 signals)
+signal_history = []
 
 
 # ====== Candle Pattern Detector ======
@@ -28,15 +33,12 @@ def detect_pattern(c):
     upper = h - max(o, close)
     lower = min(o, close) - l
 
-    # Doji
     if body <= shadow * 0.1:
         return "Doji"
-    # Hammer / Inverted Hammer
     if lower > body * 2 and upper < body:
         return "Hammer"
     if upper > body * 2 and lower < body:
         return "Inverted Hammer"
-    # Engulfing
     if close > o and (close - o) > body * 1.5:
         return "Bullish Engulfing"
     if o > close and (o - close) > body * 1.5:
@@ -44,11 +46,12 @@ def detect_pattern(c):
     return "-"
 
 
-# ====== Technical Signal ======
+# ====== Technical Signal Generator ======
 def get_signal(candles):
     closes = [c["c"] for c in candles]
     avg = statistics.mean(closes[-5:])
     last = closes[-1]
+
     pattern = detect_pattern(candles[-1])
     sig, conf = "WAIT", 0.0
 
@@ -63,6 +66,7 @@ def get_signal(candles):
 
     if pattern == "Doji":
         conf -= 10
+
     return sig, conf, pattern
 
 
@@ -72,19 +76,42 @@ async def fetch_data():
             try:
                 url = f"https://finnhub.io/api/v1/forex/candle?symbol={sym}&resolution={INTERVAL}&count=10&token={API_KEY}"
                 res = requests.get(url).json()
+
                 if res.get("s") == "ok":
-                    candles = [{"o": o, "h": h, "l": l, "c": c} for o, h, l, c in zip(res["o"], res["h"], res["l"], res["c"])]
+                    candles = [
+                        {"o": o, "h": h, "l": l, "c": c}
+                        for o, h, l, c in zip(res["o"], res["h"], res["l"], res["c"])
+                    ]
+
                     sig, conf, pat = get_signal(candles)
+                    time_now = datetime.datetime.now().strftime("%H:%M:%S")
+
+                    # ✅ Update live table
                     symbol_state[sym].update({
                         "last": round(candles[-1]["c"], 5),
                         "signal": sig,
                         "confidence": conf,
                         "pattern": pat,
-                        "updated": datetime.datetime.now().strftime("%H:%M:%S")
+                        "updated": time_now
                     })
+
+                    # ✅ Add to history
+                    signal_history.append({
+                        "symbol": sym,
+                        "signal": sig,
+                        "confidence": conf,
+                        "pattern": pat,
+                        "time": time_now
+                    })
+
+                    # ✅ Limit history size
+                    if len(signal_history) > 300:
+                        signal_history.pop(0)
+
             except Exception as e:
                 print("Error:", e)
-        await asyncio.sleep(60)  # update every 1 min
+
+        await asyncio.sleep(60)
 
 
 @app.on_event("startup")
@@ -101,26 +128,53 @@ async def home():
       <meta http-equiv="refresh" content="60">
       <style>
         body { font-family: Arial; background: #0d1117; color: #eee; text-align:center;}
-        table {margin:auto; border-collapse:collapse; width:90%;}
+        table {margin:auto; border-collapse:collapse; width:95%;}
         th,td{border:1px solid #444;padding:6px;}
         th{background:#161b22;}
-        .buy{color:#00ff80;}
-        .sell{color:#ff5555;}
+        .buy{color:#00ff80; font-weight:bold;}
+        .sell{color:#ff5555; font-weight:bold;}
       </style>
     </head>
     <body>
       <h2>💹 Smart Pro Signal v2.0 (Real-Time 1m Candle)</h2>
       <table>
         <tr><th>Symbol</th><th>Last</th><th>Signal</th><th>Confidence</th><th>Pattern</th><th>Updated</th></tr>
-        """ + "".join(
-        f"<tr><td>{s}</td><td>{v['last']}</td>"
-        f"<td class='{v['signal'].lower()}'>{v['signal']}</td>"
-        f"<td>{v['confidence']}%</td><td>{v['pattern']}</td>"
-        f"<td>{v['updated']}</td></tr>"
-        for s, v in symbol_state.items()
-    ) + """
+    """
+    for s, v in symbol_state.items():
+        html += f"""
+        <tr>
+          <td>{s}</td>
+          <td>{v['last']}</td>
+          <td class='{v['signal'].lower()}'>{v['signal']}</td>
+          <td>{v['confidence']}%</td>
+          <td>{v['pattern']}</td>
+          <td>{v['updated']}</td>
+        </tr>
+        """
+
+    html += """
       </table>
-      <p>Auto-refresh every 60s — Data via Finnhub API</p>
+
+      <h3>📜 Previous Signals (History)</h3>
+      <table>
+        <tr><th>Symbol</th><th>Signal</th><th>Confidence</th><th>Pattern</th><th>Time</th></tr>
+    """
+
+    for h in reversed(signal_history[-50:]):  # Show last 50 signals
+        html += f"""
+        <tr>
+          <td>{h['symbol']}</td>
+          <td class='{h['signal'].lower()}'>{h['signal']}</td>
+          <td>{h['confidence']}%</td>
+          <td>{h['pattern']}</td>
+          <td>{h['time']}</td>
+        </tr>
+        """
+
+    html += """
+      </table>
+      <p>Auto-refresh every 60s — Live Forex Data via Finnhub API</p>
     </body></html>
     """
+
     return HTMLResponse(html)

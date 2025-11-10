@@ -5,6 +5,3 @@ services:
     plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port 10000
-    envVars:
-      - key: FINNHUB_API_KEY
-        value: d444os1r01qge0d0g670d444os1r01qge0d0g67g
