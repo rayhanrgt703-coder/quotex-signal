@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: smart-pro-signal-v2
+    name: smart-pro-signal-v3
     env: python
     plan: free
     buildCommand: pip install -r requirements.txt
