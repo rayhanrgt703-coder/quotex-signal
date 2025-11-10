@@ -3,7 +3,7 @@ services:
     name: smart-pro-signal-v3
     env: python
     plan: free
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port 10000
     envVars:
       - key: TWELVE_DATA_API_KEY
