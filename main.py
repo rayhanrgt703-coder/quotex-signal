@@ -4,28 +4,23 @@ import asyncio, requests, datetime, statistics, os
 
 app = FastAPI()
 
-# ✅ API KEY (from Render or .env)
-API_KEY = os.getenv("FINNHUB_API_KEY")
-
+# ===== CONFIG =====
+API_KEY = os.getenv("TWELVE_DATA_API_KEY")  # Twelve Data API key
 SYMBOLS = [
-    "OANDA:EUR_USD", "OANDA:GBP_USD",
-    "OANDA:USD_JPY", "OANDA:USD_CAD",
-    "OANDA:AUD_USD", "OANDA:USD_CHF"
+    "EUR/USD", "GBP/USD",
+    "USD/JPY", "USD/CAD",
+    "AUD/USD", "USD/CHF"
 ]
+INTERVAL = "1min"  # 1m candle interval
+# ==================
 
-INTERVAL = "1"
-
-# ✅ Live state
 symbol_state = {
     sym: {"last": "-", "signal": "WAIT", "confidence": 0.0, "pattern": "-", "updated": "-"}
     for sym in SYMBOLS
 }
+signal_history = []  # store previous signals
 
-# ✅ History storage (last 300 signals)
-signal_history = []
-
-
-# ====== Candle Pattern Detector ======
+# Candle-pattern detection (same as before)
 def detect_pattern(c):
     o, h, l, close = c["o"], c["h"], c["l"], c["c"]
     body = abs(close - o)
@@ -45,13 +40,10 @@ def detect_pattern(c):
         return "Bearish Engulfing"
     return "-"
 
-
-# ====== Technical Signal Generator ======
 def get_signal(candles):
     closes = [c["c"] for c in candles]
     avg = statistics.mean(closes[-5:])
     last = closes[-1]
-
     pattern = detect_pattern(candles[-1])
     sig, conf = "WAIT", 0.0
 
@@ -69,24 +61,28 @@ def get_signal(candles):
 
     return sig, conf, pattern
 
-
 async def fetch_data():
     while True:
         for sym in SYMBOLS:
             try:
-                url = f"https://finnhub.io/api/v1/forex/candle?symbol={sym}&resolution={INTERVAL}&count=10&token={API_KEY}"
+                url = (
+                    f"https://api.twelvedata.com/time_series?"
+                    f"symbol={sym}&interval={INTERVAL}&apikey={API_KEY}&outputsize=10"
+                )
                 res = requests.get(url).json()
-
-                if res.get("s") == "ok":
-                    candles = [
-                        {"o": o, "h": h, "l": l, "c": c}
-                        for o, h, l, c in zip(res["o"], res["h"], res["l"], res["c"])
-                    ]
-
+                if "values" in res:
+                    # values list with OHLC
+                    candles = []
+                    for v in res["values"]:
+                        candles.append({
+                            "o": float(v["open"]),
+                            "h": float(v["high"]),
+                            "l": float(v["low"]),
+                            "c": float(v["close"])
+                        })
                     sig, conf, pat = get_signal(candles)
                     time_now = datetime.datetime.now().strftime("%H:%M:%S")
 
-                    # ✅ Update live table
                     symbol_state[sym].update({
                         "last": round(candles[-1]["c"], 5),
                         "signal": sig,
@@ -95,7 +91,6 @@ async def fetch_data():
                         "updated": time_now
                     })
 
-                    # ✅ Add to history
                     signal_history.append({
                         "symbol": sym,
                         "signal": sig,
@@ -104,7 +99,6 @@ async def fetch_data():
                         "time": time_now
                     })
 
-                    # ✅ Limit history size
                     if len(signal_history) > 300:
                         signal_history.pop(0)
 
@@ -113,11 +107,9 @@ async def fetch_data():
 
         await asyncio.sleep(60)
 
-
 @app.on_event("startup")
 async def start_fetch():
     asyncio.create_task(fetch_data())
-
 
 @app.get("/")
 async def home():
@@ -151,16 +143,13 @@ async def home():
           <td>{v['updated']}</td>
         </tr>
         """
-
     html += """
       </table>
-
       <h3>📜 Previous Signals (History)</h3>
       <table>
         <tr><th>Symbol</th><th>Signal</th><th>Confidence</th><th>Pattern</th><th>Time</th></tr>
     """
-
-    for h in reversed(signal_history[-50:]):  # Show last 50 signals
+    for h in reversed(signal_history[-50:]):
         html += f"""
         <tr>
           <td>{h['symbol']}</td>
@@ -170,11 +159,9 @@ async def home():
           <td>{h['time']}</td>
         </tr>
         """
-
     html += """
       </table>
-      <p>Auto-refresh every 60s — Live Forex Data via Finnhub API</p>
+      <p>Auto-refresh every 60s — Live Forex Data via Twelve Data API</p>
     </body></html>
     """
-
     return HTMLResponse(html)
