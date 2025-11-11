@@ -1,24 +1,35 @@
-# 💹 Smart Pro Signal v4.0 — Sure Signals (Real-Time 1m Candle)
+# 💹 Smart Pro Signal v4.0 — Finnhub Edition
 
-A highly accurate Quotex/Forex signal app that combines candlestick pattern recognition + multiple indicator confirmations (MA, RSI, MACD).
+A real-time Quotex/Forex signal app using **Finnhub API** with candlestick pattern + indicator confirmation.
 
-### ⚙️ Setup (Render)
-1. Upload these 4 files:
-   - main.py
-   - requirements.txt
-   - render.yaml
-   - README.md
-2. Add your `TWELVE_DATA_API_KEY` in environment variables.
-3. Deploy → App URL will auto-refresh every 1 min.
+### ⚙️ Setup (Render.com)
+1. Go to [Render](https://render.com) → Create **New Web Service**.
+2. Upload these files:
+   - `main.py`
+   - `requirements.txt`
+   - `render.yaml`
+   - `README.md`
+3. Add Environment Variable:
+   - Key: `FINNHUB_API_KEY`
+   - Value: your Finnhub API key
+4. Deploy and open your web URL.
 
 ### 📊 Features
-- Real-time 1m candle updates
-- Uses SMA(5,10), RSI(14), MACD, and pattern filter
-- Signal triggers only when ≥3 indicators agree
-- 90–99% sure signal accuracy
-- Low noise, fewer but stronger signals
-- Keeps last 30 sure signals
+- Real-time 1-minute candle analysis
+- Candlestick + SMA + RSI + MACD strategy
+- Only shows signals with **Confidence ≥ 90%**
+- Auto-refresh every 1 minute
+- Sure signal history tracking
 
-⚡ **Accuracy:** 90–99%  
-📈 **Interval:** 1 minute  
-🔗 **Data Source:** [TwelveData.com](https://twelvedata.com)
+### 📈 Accuracy
+- Combines multiple indicator confirmations  
+- Prioritizes quality (sure) over quantity (no spam signals)
+
+### 🔗 Data Source
+- [Finnhub.io](https://finnhub.io)
+
+---
+
+✅ **Tips**
+- If market is closed (Saturday/Sunday), data may stay “WAIT”.
+- You can use free API key with 60/min limit, or upgrade for unlimited data.
