@@ -8,3 +8,4 @@ services:
     envVars:
       - key: TWELVE_DATA_API_KEY
         value: c5d62a9eeab74982816d3378883e4133
+
