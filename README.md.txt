@@ -1,35 +1,14 @@
-# 💹 Smart Pro Signal v4.0 — Finnhub Edition
+# 💹 Smart Pro Signal v5.0 — Real-Time 1m Candle (Start/Stop Control)
 
-A real-time Quotex/Forex signal app using **Finnhub API** with candlestick pattern + indicator confirmation.
+### 🚀 Features
+- Start / Stop control to save API limit
+- Real-Time 1-minute sure signals (EUR/USD, GBP/USD, USD/JPY)
+- Indicators: RSI, MA, Bollinger Bands, MACD + Candlestick Patterns
+- Only shows signals with 90–98% confidence
+- Keeps last 30 signals below live table
 
-### ⚙️ Setup (Render.com)
-1. Go to [Render](https://render.com) → Create **New Web Service**.
-2. Upload these files:
-   - `main.py`
-   - `requirements.txt`
-   - `render.yaml`
-   - `README.md`
-3. Add Environment Variable:
-   - Key: `FINNHUB_API_KEY`
-   - Value: your Finnhub API key
-4. Deploy and open your web URL.
+### ⚙️ Setup (Render)
+1. Upload all 4 files to Render.
+2. Add `TWELVE_DATA_API_KEY` in Environment Variables.
+3. Deploy → Open → Click **Start** to begin real-time fetching.
 
-### 📊 Features
-- Real-time 1-minute candle analysis
-- Candlestick + SMA + RSI + MACD strategy
-- Only shows signals with **Confidence ≥ 90%**
-- Auto-refresh every 1 minute
-- Sure signal history tracking
-
-### 📈 Accuracy
-- Combines multiple indicator confirmations  
-- Prioritizes quality (sure) over quantity (no spam signals)
-
-### 🔗 Data Source
-- [Finnhub.io](https://finnhub.io)
-
----
-
-✅ **Tips**
-- If market is closed (Saturday/Sunday), data may stay “WAIT”.
-- You can use free API key with 60/min limit, or upgrade for unlimited data.
