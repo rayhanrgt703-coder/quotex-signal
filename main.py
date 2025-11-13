@@ -1,136 +1,204 @@
-import os
-import asyncio
-import requests
-import datetime
-import pandas as pd
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
+import asyncio, requests, datetime, statistics, math
+
+# ========= CONFIG =========
+OANDA_API_KEY = "3fcd3abcee574d4b6081e450bf98d969-4a3215c4edf0713b3fe9c2a5bf497c63"
+OANDA_ENV = "practice"
+SYMBOLS = ["EUR_USD", "GBP_USD", "USD_JPY", "USD_CAD", "AUD_USD", "USD_CHF"]
+TELEGRAM_TOKEN = "8473428374:AAH_GraV2w1epaaa1ZI0d1sMuqI5jeLdMr0"
+TELEGRAM_CHAT_ID = "5422664137"
+FETCH_INTERVAL = 60  # seconds
+RUNNING = True
+# ==========================
 
 app = FastAPI()
-
-API_KEY = os.getenv("TWELVE_DATA_API_KEY")
-SYMBOLS = ["EUR/USD", "GBP/USD", "USD/JPY"]
-INTERVAL = "1min"
-CONF_THRESHOLD = 90.0
-
-symbol_state = {
-    sym: {"last": "-", "signal": "WAIT", "confidence": 0.0, "pattern": "-", "updated": "-"}
-    for sym in SYMBOLS
-}
+symbol_state = {}
 signal_history = []
-running = True
 
-def sma(series, period):
-    return series.rolling(period).mean()
+BASE_URL = f"https://api-fx{OANDA_ENV}.oanda.com/v3/instruments"
 
-def rsi(series, period=14):
-    delta = series.diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
-    avg_gain = gain.rolling(window=period).mean()
-    avg_loss = loss.rolling(window=period).mean()
+
+# ==== Utility ====
+def send_telegram(msg: str):
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"}
+        requests.post(url, json=payload)
+    except Exception as e:
+        print("Telegram Error:", e)
+
+
+def rsi(closes, period=14):
+    if len(closes) < period:
+        return 50
+    gains = [max(closes[i] - closes[i - 1], 0) for i in range(1, period)]
+    losses = [max(closes[i - 1] - closes[i], 0) for i in range(1, period)]
+    avg_gain = sum(gains) / period
+    avg_loss = sum(losses) / period if sum(losses) != 0 else 1
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
-def detect_pattern(df):
-    o, h, l, c = df.iloc[-1][["open", "high", "low", "close"]]
-    body = abs(c - o)
+
+def moving_average(data, period=10):
+    if len(data) < period:
+        return statistics.mean(data)
+    return statistics.mean(data[-period:])
+
+
+def bollinger_bands(data, period=20):
+    if len(data) < period:
+        avg = statistics.mean(data)
+        std = statistics.pstdev(data)
+    else:
+        avg = statistics.mean(data[-period:])
+        std = statistics.pstdev(data[-period:])
+    return avg + 2 * std, avg - 2 * std
+
+
+def macd(data, short=12, long=26, signal=9):
+    if len(data) < long:
+        return 0, 0
+    ema_short = statistics.mean(data[-short:])
+    ema_long = statistics.mean(data[-long:])
+    macd_line = ema_short - ema_long
+    signal_line = statistics.mean(data[-signal:])
+    return macd_line, macd_line - signal_line
+
+
+def detect_pattern(c):
+    o, h, l, close = c["o"], c["h"], c["l"], c["c"]
+    body = abs(close - o)
     shadow = h - l
+    upper = h - max(o, close)
+    lower = min(o, close) - l
     if body <= shadow * 0.1:
         return "Doji"
-    if l + (body * 2) < min(o, c):
+    if lower > body * 2 and upper < body:
         return "Hammer"
-    if h - (body * 2) > max(o, c):
+    if upper > body * 2 and lower < body:
         return "Inverted Hammer"
-    if c > o and (c - o) > body * 1.5:
+    if close > o and (close - o) > body * 1.5:
         return "Bullish Engulfing"
-    if o > c and (o - c) > body * 1.5:
+    if o > close and (o - close) > body * 1.5:
         return "Bearish Engulfing"
     return "-"
 
-def get_signal(df):
-    pattern = detect_pattern(df)
-    close = df["close"]
-    sma5 = sma(close, 5).iloc[-1]
-    sma10 = sma(close, 10).iloc[-1]
-    rsi14 = rsi(close).iloc[-1]
 
-    conf = 0
-    sig = "WAIT"
-    if sma5 > sma10 and rsi14 > 55:
-        sig, conf = "BUY", 93
-    elif sma5 < sma10 and rsi14 < 45:
-        sig, conf = "SELL", 93
+def analyze(candles):
+    closes = [c["c"] for c in candles]
+    last = closes[-1]
+    rsi_val = rsi(closes)
+    upper, lower = bollinger_bands(closes)
+    macd_line, macd_hist = macd(closes)
+    sma = moving_average(closes, 10)
+    pattern = detect_pattern(candles[-1])
+    signal, conf = "WAIT", 0.0
 
-    if pattern in ["Bullish Engulfing", "Hammer"]:
-        sig, conf = "BUY", 95
-    elif pattern in ["Bearish Engulfing", "Inverted Hammer"]:
-        sig, conf = "SELL", 95
+    # Trend + pattern filtering
+    if last > sma and macd_hist > 0 and rsi_val > 55 and pattern in ["Bullish Engulfing", "Hammer"]:
+        signal, conf = "BUY", 95
+    elif last < sma and macd_hist < 0 and rsi_val < 45 and pattern in ["Bearish Engulfing", "Inverted Hammer"]:
+        signal, conf = "SELL", 95
+    elif last > sma and rsi_val > 60:
+        signal, conf = "BUY", 88
+    elif last < sma and rsi_val < 40:
+        signal, conf = "SELL", 88
 
-    return sig, conf, pattern
+    if pattern == "Doji":
+        conf -= 10
+
+    conf = max(conf, 85)
+    return signal, conf, pattern
+
 
 async def fetch_data():
-    global running
+    global RUNNING
     while True:
-        if not running:
-            await asyncio.sleep(2)
+        if not RUNNING:
+            await asyncio.sleep(5)
             continue
+
         for sym in SYMBOLS:
             try:
-                url = f"https://api.twelvedata.com/time_series?symbol={sym}&interval={INTERVAL}&apikey={API_KEY}&outputsize=50"
-                r = requests.get(url)
-                res = r.json()
-                if "values" not in res:
-                    continue
-                df = pd.DataFrame(res["values"])
-                for col in ["open", "high", "low", "close", "volume"]:
-                    df[col] = pd.to_numeric(df[col], errors="coerce")
-                df = df.iloc[::-1]
-                sig, conf, pattern = get_signal(df)
-                if conf >= CONF_THRESHOLD:
-                    symbol_state[sym].update({
-                        "last": round(df["close"].iloc[-1], 5),
-                        "signal": sig,
-                        "confidence": conf,
-                        "pattern": pattern,
-                        "updated": datetime.datetime.now().strftime("%H:%M:%S")
-                    })
-                    signal_history.append({
-                        "time": datetime.datetime.now().strftime("%H:%M:%S"),
-                        "symbol": sym, "signal": sig,
-                        "confidence": conf, "pattern": pattern
-                    })
-                    if len(signal_history) > 30:
-                        signal_history.pop(0)
+                url = f"{BASE_URL}/{sym}/candles?granularity=M1&count=20"
+                headers = {"Authorization": f"Bearer {OANDA_API_KEY}"}
+                res = requests.get(url, headers=headers).json()
+                if "candles" in res:
+                    candles = [
+                        {"o": float(c["mid"]["o"]), "h": float(c["mid"]["h"]),
+                         "l": float(c["mid"]["l"]), "c": float(c["mid"]["c"])}
+                        for c in res["candles"] if c["complete"]
+                    ]
+                    sig, conf, pat = analyze(candles)
+                    last = candles[-1]["c"]
+                    now = datetime.datetime.now().strftime("%H:%M:%S")
+
+                    symbol_state[sym] = {
+                        "last": last, "signal": sig, "confidence": conf,
+                        "pattern": pat, "updated": now
+                    }
+
+                    # Signal history + telegram send
+                    if conf >= 85 and sig != "WAIT":
+                        msg = f"📊 <b>{sym}</b>\nSignal: <b>{sig}</b>\nConfidence: {conf}%\nPattern: {pat}\nPrice: {last}\n🕒 {now}"
+                        send_telegram(msg)
+                        signal_history.insert(0, {
+                            "symbol": sym, "signal": sig, "confidence": conf,
+                            "pattern": pat, "time": now
+                        })
+                        signal_history[:] = signal_history[:15]
             except Exception as e:
-                print(f"{sym} Error:", e)
-        await asyncio.sleep(60)
+                print("Error:", e)
+        await asyncio.sleep(FETCH_INTERVAL)
+
 
 @app.on_event("startup")
 async def start_fetch():
     asyncio.create_task(fetch_data())
 
-@app.post("/toggle")
-async def toggle_fetch(request: Request):
-    global running
-    running = not running
-    return {"running": running}
 
-@app.get("/")
+@app.post("/toggle")
+async def toggle(request: Request):
+    global RUNNING
+    data = await request.json()
+    RUNNING = data.get("run", True)
+    return JSONResponse({"status": "running" if RUNNING else "stopped"})
+
+
+@app.get("/", response_class=HTMLResponse)
 async def home():
-    status = "🟢 RUNNING" if running else "⏸️ STOPPED"
-    html = f"""
-    <html><head><title>Smart Pro Signal v5.0</title></head><body style="background:#0d1117;color:white;text-align:center;font-family:Arial">
-    <h2>💹 Smart Pro Signal v5.0 — Real-Time Sure Signal</h2>
-    <form method="post" action="/toggle"><button> {'🟢 Stop' if running else '▶️ Start'} </button></form>
-    <table border="1" style="margin:auto;border-collapse:collapse;width:90%">
-    <tr><th>Symbol</th><th>Last</th><th>Signal</th><th>Confidence</th><th>Pattern</th><th>Updated</th></tr>
+    html = """
+    <html><head><title>Smart Pro Signal v2.0</title>
+    <meta http-equiv="refresh" content="60">
+    <style>
+      body{background:#0d1117;color:#eee;font-family:Arial;text-align:center;}
+      table{margin:auto;border-collapse:collapse;width:90%;}
+      th,td{border:1px solid #444;padding:6px;}
+      th{background:#161b22;}
+      .buy{color:#00ff80;}
+      .sell{color:#ff5555;}
+      button{padding:10px 20px;background:#008cff;color:white;border:none;border-radius:6px;cursor:pointer;margin:10px;}
+      button.stop{background:#ff4444;}
+    </style></head><body>
+      <h2>💹 Smart Pro Signal v2.0 (OANDA API)</h2>
+      <button onclick="toggle(true)">▶ Start</button>
+      <button class='stop' onclick="toggle(false)">⏸ Stop</button>
+      <table><tr><th>Symbol</th><th>Last</th><th>Signal</th><th>Conf%</th><th>Pattern</th><th>Updated</th></tr>
     """
     for s, v in symbol_state.items():
-        html += f"<tr><td>{s}</td><td>{v['last']}</td><td>{v['signal']}</td><td>{v['confidence']}%</td><td>{v['pattern']}</td><td>{v['updated']}</td></tr>"
-    html += "</table><br><h3>📜 Previous Sure Signals (last 30)</h3><table border='1' style='margin:auto;width:90%'>"
-    html += "<tr><th>Time</th><th>Symbol</th><th>Signal</th><th>Conf</th><th>Pattern</th></tr>"
-    for h in reversed(signal_history):
-        html += f"<tr><td>{h['time']}</td><td>{h['symbol']}</td><td>{h['signal']}</td><td>{h['confidence']}%</td><td>{h['pattern']}</td></tr>"
-    html += f"</table><p>Auto-refresh 30s | Data: TwelveData API | Status: {status}</p></body></html>"
+        html += f"<tr><td>{s}</td><td>{v['last']}</td><td class='{v['signal'].lower()}'>{v['signal']}</td><td>{v['confidence']}%</td><td>{v['pattern']}</td><td>{v['updated']}</td></tr>"
+    html += "</table><h3>📜 Previous Signals</h3><table><tr><th>Symbol</th><th>Signal</th><th>Conf%</th><th>Pattern</th><th>Time</th></tr>"
+    for h in signal_history:
+        html += f"<tr><td>{h['symbol']}</td><td>{h['signal']}</td><td>{h['confidence']}%</td><td>{h['pattern']}</td><td>{h['time']}</td></tr>"
+    html += """
+    </table>
+    <script>
+      async function toggle(run){
+        await fetch('/toggle', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({run})});
+        alert(run?'Started':'Stopped');
+      }
+    </script>
+    </body></html>
+    """
     return HTMLResponse(html)
