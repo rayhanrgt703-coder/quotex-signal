@@ -8,9 +8,10 @@ services:
     envVars:
       - key: OANDA_API_KEY
         sync: false
+      - key: OANDA_ENV
+        value: practice
       - key: TELEGRAM_TOKEN
         sync: false
       - key: TELEGRAM_CHAT_ID
         sync: false
-      - key: OANDA_ENV
-        value: practice
+
