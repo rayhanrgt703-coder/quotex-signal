@@ -1,339 +1,393 @@
-# main.py
-"""
-Smart Pro Signal — OANDA (candle-close realtime) + Telegram + 10s UI/WebSocket refresh
-- Evaluates on 1-minute candle close (1m + 5m confirmation)
-- UI auto-refresh + websocket push every 10 seconds
-- Start/Stop buttons, history, Telegram alerts for strong signals (>= HIGH_CONF)
-Environment variables:
- - OANDA_API_KEY
- - OANDA_ENV (practice or live)
- - TELEGRAM_TOKEN
- - TELEGRAM_CHAT_ID
-Start:
- uvicorn main:app --host 0.0.0.0 --port 10000
-"""
-import os
-import time
-import math
-import asyncio
-import requests
-import datetime
-from typing import List, Dict, Any
-from fastapi import FastAPI, WebSocket
+# main_streaming_high_accuracy.py  (Streaming + ATR + Volume + Multi-Timeframe + Adaptive Confidence)
+# Save as main.py and set environment variables or edit CONFIG below.
+from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
+import asyncio, requests, datetime, json, statistics, websockets, time
 
-app = FastAPI(title="Smart Pro Signal (OANDA)")
+# ====================== CONFIG ======================
+OANDA_API_KEY = "3fcd3abcee574d4b6081e450bf98d969-4a3215c4edf0713b3fe9c2a5bf497c63"
+OANDA_ENV = "practice"  # "practice" or "live"
+ACCOUNT_ID = "YOUR_OANDA_ACCOUNT_ID"
+SYMBOLS = ["EUR_USD", "GBP_USD", "USD_JPY"]
+TELEGRAM_TOKEN = "8473428374:AAH_GraV2w1epaaa1ZI0d1sMuqI5jeLdMr0"
+TELEGRAM_CHAT_ID = "5422664137"
+RUNNING = True
+# How many seconds to wait before evaluating a sent signal for success
+EVAL_WINDOW_SEC = 60
+# Profit target & stoploss multiples of ATR
+TP_ATR_MULT = 0.5
+SL_ATR_MULT = 0.8
+# Minimum ATR to consider (to avoid choppy markets)
+MIN_ATR = 0.0001
+# Volume multiplier (current candle volume must be > avg_volume * VOLUME_MULT)
+VOLUME_MULT = 1.2
+# How many historical signals to use for adaptive confidence
+ADAPT_HISTORY = 30
+# REST candle fetch frequency (seconds)
+CANDLE_FETCH_INTERVAL = 5
+# Number of historical candles to keep
+HIST_CANDLES = 120
+# ====================================================
 
-# -------- CONFIG ----------
-OANDA_KEY = os.getenv("OANDA_API_KEY", "").strip()
-OANDA_ENV = os.getenv("OANDA_ENV", "practice").strip().lower()
-if OANDA_ENV == "live":
-    OANDA_BASE = "https://api-fxtrade.oanda.com/v3"
-else:
-    OANDA_BASE = "https://api-fxpractice.oanda.com/v3"
+app = FastAPI()
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+# runtime state
+symbol_state = {}         # latest displayed state
+signal_history = []       # sent signals with metadata (most recent first)
+signal_eval = []          # list of dicts {sent_time, symbol, side, entry, tp, sl, status}
 
-SYMBOLS = ["EUR_USD", "GBP_USD", "USD_JPY", "USD_CAD", "AUD_USD", "USD_CHF"]
-HIGH_CONF = 85.0
-MED_CONF = 60.0
-WEIGHTS = {"sma": 1.2, "macd": 2.0, "rsi": 1.6, "bb": 1.4, "momentum": 1.8}
-TOTAL_WEIGHT = sum(WEIGHTS.values())
-FETCH_COUNT = 200
-HISTORY_LIMIT = 500
+# buffers
+tick_buffer = {sym: [] for sym in SYMBOLS}      # last N mid-price ticks
+candles_1m = {sym: [] for sym in SYMBOLS}       # REST candles (1m)
+candles_5m = {sym: [] for sym in SYMBOLS}       # REST candles (5m)
 
-symbol_state: Dict[str, Dict[str, Any]] = {
-    s: {"last": None, "signal": "WAIT", "confidence": 0.0, "pattern": "-", "updated": "-"} for s in SYMBOLS
-}
-signal_history: List[Dict[str, Any]] = []
-running_flag = False
+# helper: send telegram
+def send_telegram(msg: str):
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"}, timeout=5)
+    except Exception as e:
+        print("Telegram Error:", e)
 
-
-# ---------- indicators ----------
-def sma(values: List[float], period: int) -> float:
-    if not values:
-        return 0.0
-    if len(values) < period:
-        return sum(values) / len(values)
-    return sum(values[-period:]) / period
-
-
-def ema(values: List[float], period: int) -> float:
-    if not values:
-        return 0.0
-    k = 2 / (period + 1)
-    e = values[0]
-    for v in values[1:]:
-        e = v * k + e * (1 - k)
-    return e
-
-
-def compute_rsi(closes: List[float], period: int = 14) -> float:
+# indicators
+def atr_from_closes_highs_lows(highs, lows, closes, period=14):
     if len(closes) < period + 1:
-        return 50.0
-    gains, losses = [], []
+        return 0.0
+    trs = []
     for i in range(1, len(closes)):
-        diff = closes[i] - closes[i - 1]
-        gains.append(max(diff, 0))
-        losses.append(max(-diff, 0))
-    gains = gains[-period:]
-    losses = losses[-period:]
-    avg_gain = sum(gains) / period
-    avg_loss = sum(losses) / period
-    if avg_loss == 0:
-        return 100.0 if avg_gain > 0 else 50.0
-    rs = avg_gain / avg_loss
+        tr = max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1]))
+        trs.append(tr)
+    if len(trs) < period:
+        return statistics.mean(trs) if trs else 0.0
+    return statistics.mean(trs[-period:])
+
+
+def rsi(closes, period=14):
+    if len(closes) < period + 1:
+        return 50
+    gains, losses = [], []
+    for i in range(1, period + 1):
+        diff = closes[-period - 1 + i] - closes[-period - 2 + i]
+        if diff > 0:
+            gains.append(diff)
+        else:
+            losses.append(abs(diff))
+    avg_gain = sum(gains) / period if gains else 0.0
+    avg_loss = sum(losses) / period if losses else 1e-9
+    rs = avg_gain / avg_loss if avg_loss != 0 else 0
     return 100 - (100 / (1 + rs))
 
 
-def macd_and_hist(closes: List[float], fast=12, slow=26, signal=9):
-    if len(closes) < slow + 1:
-        return 0.0, 0.0
-    macd_line = ema(closes, fast) - ema(closes, slow)
-    macd_series = []
-    if len(closes) >= slow + signal:
-        window = closes[-(slow + signal):]
-        for i in range(signal, len(window)):
-            sub = window[: i + 1]
-            macd_series.append(ema(sub, fast) - ema(sub, slow))
-    signal_line = ema(macd_series, signal) if macd_series else 0.0
-    return macd_line, macd_line - signal_line
+def sma(data, period=10):
+    if len(data) < period:
+        return statistics.mean(data) if data else 0.0
+    return statistics.mean(data[-period:])
 
 
-def bollinger(closes: List[float], period: int = 20, mult: float = 2.0):
-    if len(closes) < period:
-        return None, None, None
-    window = closes[-period:]
-    mid = sum(window) / period
-    var = sum((x - mid) ** 2 for x in window) / period
-    sd = math.sqrt(var)
-    return mid, mid + mult * sd, mid - mult * sd
+def macd_hist(closes, short=12, long=26, signal=9):
+    if len(closes) < long:
+        return 0.0
+    ema_short = statistics.mean(closes[-short:])
+    ema_long = statistics.mean(closes[-long:])
+    macd_line = ema_short - ema_long
+    sig_line = statistics.mean(closes[-signal:]) if len(closes) >= signal else 0.0
+    return macd_line - sig_line
 
 
 def detect_pattern(c):
-    o, h, l, cl = c["o"], c["h"], c["l"], c["c"]
-    body = abs(cl - o)
-    rng = h - l if (h - l) != 0 else 1e-9
-    upper = h - max(o, cl)
-    lower = min(o, cl) - l
-    if body / rng < 0.12:
-        return "Doji"
+    # candle dict: {o,h,l,c}
+    o,h,l,close = c['o'], c['h'], c['l'], c['c']
+    body = abs(close - o)
+    shadow = (h - l) or 1e-9
+    upper = h - max(o, close)
+    lower = min(o, close) - l
+    if body <= shadow * 0.1:
+        return 'Doji'
     if lower > body * 2 and upper < body:
-        return "Hammer"
+        return 'Hammer'
     if upper > body * 2 and lower < body:
-        return "Inverted Hammer"
-    if cl > o and (cl - o) > body * 1.5:
-        return "Bullish Engulfing"
-    if o > cl and (o - cl) > body * 1.5:
-        return "Bearish Engulfing"
-    return "-"
+        return 'Inverted Hammer'
+    if close > o and (close - o) > body * 1.5:
+        return 'Bullish Engulfing'
+    if o > close and (o - close) > body * 1.5:
+        return 'Bearish Engulfing'
+    return '-'
 
+# adaptive confidence calculation
+def adaptive_confidence(base_conf):
+    # compute recent success rate
+    recent = [1 if s.get('status')=='WIN' else 0 for s in signal_eval[-ADAPT_HISTORY:]]
+    if not recent:
+        return base_conf
+    success_rate = sum(recent)/len(recent)
+    # scale base_conf by factor between 0.8 and 1.2 depending on success_rate
+    factor = 0.8 + (success_rate * 0.4)
+    adj = base_conf * factor
+    return min(round(adj), 99)
 
-# ---------- fetch ----------
-def fetch_oanda_candles(instrument: str, granularity: str = "M1", count: int = FETCH_COUNT):
-    if not OANDA_KEY:
-        return {"error": "OANDA_API_KEY not set"}
-    url = f"{OANDA_BASE}/instruments/{instrument}/candles"
-    params = {"granularity": granularity, "count": count, "price": "M"}
-    headers = {"Authorization": f"Bearer {OANDA_KEY}"}
-    try:
-        resp = requests.get(url, params=params, headers=headers, timeout=10)
-        data = resp.json()
-        if "candles" not in data:
-            return {"error": data}
-        candles = []
-        for c in data["candles"]:
-            mid = c.get("mid", c)
-            candles.append(
-                {"o": float(mid["o"]), "h": float(mid["h"]), "l": float(mid["l"]), "c": float(mid["c"]),
-                 "time": c.get("time"), "complete": c.get("complete", True)}
-            )
-        return candles
-    except Exception as e:
-        return {"error": str(e)}
+# combined analysis using MTF candles and current ticks
+def analyze_symbol(sym):
+    # require enough data
+    c1 = candles_1m.get(sym, [])
+    c5 = candles_5m.get(sym, [])
+    ticks = tick_buffer.get(sym, [])
+    if len(c1) < 30 or len(c5) < 12 or len(ticks) < 3:
+        return 'WAIT', 0, '-', 0.0, 0.0
 
+    closes1 = [c['c'] for c in c1]
+    highs1 = [c['h'] for c in c1]
+    lows1 = [c['l'] for c in c1]
+    vol1 = [c.get('volume',0) for c in c1]
 
-# ---------- scoring ----------
-def score_from_indicators(ind):
-    score = 0.0
-    score += WEIGHTS["sma"] if ind["sma5"] > ind["sma20"] else -WEIGHTS["sma"]
-    score += WEIGHTS["macd"] if ind["macd"] > 0 else -WEIGHTS["macd"]
-    if ind["rsi"] > 55:
-        score += WEIGHTS["rsi"]
-    elif ind["rsi"] < 45:
-        score -= WEIGHTS["rsi"]
-    if ind["bb_mid"] is not None:
-        if ind["last"] > ind["bb_mid"]:
-            score += WEIGHTS["bb"]
-        else:
-            score -= WEIGHTS["bb"]
-    score += WEIGHTS["momentum"] if ind["momentum"] > 0 else -WEIGHTS["momentum"]
-    return score
+    closes5 = [c['c'] for c in c5]
+    highs5 = [c['h'] for c in c5]
+    lows5 = [c['l'] for c in c5]
 
+    last_price = ticks[-1]
 
-def normalize_conf(score):
-    normalized = (score + TOTAL_WEIGHT) / (2 * TOTAL_WEIGHT)
-    return max(0.0, min(100.0, normalized * 100.0))
+    # indicators
+    atr1 = atr_from_closes_highs_lows(highs1, lows1, closes1)
+    atr5 = atr_from_closes_highs_lows(highs5, lows5, closes5)
+    rsi1 = rsi(closes1)
+    macdh = macd_hist(closes1)
+    sma10 = sma(closes1, 10)
+    pattern = detect_pattern(c1[-1])
 
+    avg_vol = statistics.mean(vol1[-20:]) if len(vol1) >= 20 else statistics.mean(vol1)
+    cur_vol = vol1[-1]
 
-# ---------- evaluation ----------
-def evaluate_symbol(symbol: str):
-    c1 = fetch_oanda_candles(symbol, "M1", 200)
-    c5 = fetch_oanda_candles(symbol, "M5", 200)
-    if isinstance(c1, dict) and "error" in c1:
-        return {"error": c1["error"]}
-    if isinstance(c5, dict) and "error" in c5:
-        return {"error": c5["error"]}
-    closes1 = [x["c"] for x in c1 if x.get("complete", True)]
-    closes5 = [x["c"] for x in c5 if x.get("complete", True)]
-    if len(closes1) < 5 or len(closes5) < 5:
-        return None
+    # Basic filters
+    if atr1 < MIN_ATR:
+        return 'WAIT', 0, pattern, last_price, atr1
+    if cur_vol < (avg_vol * VOLUME_MULT):
+        return 'WAIT', 0, pattern, last_price, atr1
 
-    def inds(closes, raw):
-        macd_val, macd_hist = macd_and_hist(closes)
-        mid, up, low = bollinger(closes)
-        return {
-            "last": closes[-1],
-            "sma5": sma(closes, 5),
-            "sma20": sma(closes, 20),
-            "rsi": compute_rsi(closes),
-            "macd": macd_val,
-            "bb_mid": mid,
-            "momentum": closes[-1] - closes[-2],
-            "pattern": detect_pattern(raw[-1]),
-        }
+    # Trading rules (stricter): require 1m alignment and 5m trend
+    buy = last_price > sma10 and macdh > 0 and rsi1 > 55 and pattern in ['Bullish Engulfing','Hammer'] and closes5[-1] > sma(closes5,10)
+    sell = last_price < sma10 and macdh < 0 and rsi1 < 45 and pattern in ['Bearish Engulfing','Inverted Hammer'] and closes5[-1] < sma(closes5,10)
 
-    i1 = inds(closes1, c1)
-    i5 = inds(closes5, c5)
-    score1, score5 = score_from_indicators(i1), score_from_indicators(i5)
-    conf = (normalize_conf(score1) * 0.45 + normalize_conf(score5) * 0.55)
-    dir1, dir5 = (1 if score1 > 0 else -1 if score1 < 0 else 0), (1 if score5 > 0 else -1 if score5 < 0 else 0)
-    signal = "WAIT"
-    if dir1 == dir5 and conf >= HIGH_CONF:
-        signal = "BUY" if dir1 > 0 else "SELL"
-    elif conf >= MED_CONF:
-        signal = "BUY" if score1 + score5 > 0 else "SELL"
-    return {"last": round(i1["last"], 5), "signal": signal, "confidence": round(conf, 2), "pattern": i1["pattern"]}
+    signal, base_conf = 'WAIT', 0
+    if buy:
+        signal, base_conf = 'BUY', 95
+    elif sell:
+        signal, base_conf = 'SELL', 95
+    elif last_price > sma10 and rsi1 > 60:
+        signal, base_conf = 'BUY', 88
+    elif last_price < sma10 and rsi1 < 40:
+        signal, base_conf = 'SELL', 88
 
+    # lower confidence for Doji
+    if pattern == 'Doji':
+        base_conf -= 10
 
-# ---------- Telegram ----------
-def send_telegram_message(text: str):
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        return
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}, timeout=8)
-    except Exception as e:
-        print("Telegram error:", e)
+    base_conf = max(base_conf, 85)
+    conf = adaptive_confidence(base_conf)
+    return signal, conf, pattern, last_price, atr1
 
-
-# ---------- Candle loop ----------
-async def candle_close_loop():
-    global running_flag
+# monitor signals for result (win/lose) using ticks within EVAL_WINDOW_SEC
+async def monitor_signal_outcomes():
     while True:
-        now = datetime.datetime.utcnow()
-        await asyncio.sleep(60 - now.second + 0.6)
-        if not running_flag:
-            continue
+        now_ts = time.time()
+        for ev in list(signal_eval):
+            if ev['status'] != 'PENDING':
+                continue
+            elapsed = now_ts - ev['sent_ts']
+            if elapsed >= EVAL_WINDOW_SEC:
+                # time's up — determine outcome based on last observed price
+                ticks = tick_buffer.get(ev['symbol'], [])
+                if not ticks:
+                    ev['status'] = 'NO_DATA'
+                else:
+                    last = ticks[-1]
+                    side = ev['side']
+                    if side == 'BUY':
+                        if last >= ev['tp']:
+                            ev['status'] = 'WIN'
+                        elif last <= ev['sl']:
+                            ev['status'] = 'LOSS'
+                        else:
+                            ev['status'] = 'LOSS'
+                    else:
+                        if last <= ev['tp']:
+                            ev['status'] = 'WIN'
+                        elif last >= ev['sl']:
+                            ev['status'] = 'LOSS'
+                        else:
+                            ev['status'] = 'LOSS'
+            # keep only recent evals
+        # trim
+        signal_eval[:] = signal_eval[-200:]
+        await asyncio.sleep(1)
+
+# fetch candles periodically (REST) for volume, ATR, MTF context
+async def fetch_candles_task():
+    hdr = {"Authorization": f"Bearer {OANDA_API_KEY}"}
+    base = f"https://api-fx{oanda_env()} .oanda.com/v3/instruments"
+    # note: oanda_env() helper gives correct prefix
+    while True:
         for sym in SYMBOLS:
             try:
-                r = evaluate_symbol(sym)
-                if not r or "error" in r:
-                    continue
-                symbol_state[sym].update(
-                    {"last": r["last"], "signal": r["signal"], "confidence": r["confidence"],
-                     "pattern": r["pattern"], "updated": datetime.datetime.now().strftime("%H:%M:%S")}
-                )
-                if r["signal"] in ("BUY", "SELL") and r["confidence"] >= HIGH_CONF:
-                    signal_history.append({"symbol": sym, "signal": r["signal"], "confidence": r["confidence"],
-                                           "pattern": r["pattern"], "time": datetime.datetime.now().strftime("%H:%M:%S")})
-                    if len(signal_history) > HISTORY_LIMIT:
-                        signal_history.pop(0)
-                    send_telegram_message(f"💹 {sym}: {r['signal']} ({r['confidence']}%) Pattern: {r['pattern']}")
+                # 1m candles
+                url1 = f"https://api-fx{oanda_env()}.oanda.com/v3/instruments/{sym}/candles?granularity=M1&count={HIST_CANDLES}&price=M"
+                r1 = requests.get(url1, headers=hdr, timeout=8).json()
+                if 'candles' in r1:
+                    arr = []
+                    for c in r1['candles']:
+                        try:
+                            arr.append({
+                                't': c['time'],
+                                'o': float(c['mid']['o']),
+                                'h': float(c['mid']['h']),
+                                'l': float(c['mid']['l']),
+                                'c': float(c['mid']['c']),
+                                'complete': bool(c.get('complete', False)),
+                                'volume': int(c.get('volume',0))
+                            })
+                        except Exception:
+                            continue
+                    candles_1m[sym] = sorted(arr, key=lambda x: x['t'])
+
+                # 5m candles
+                url5 = f"https://api-fx{oanda_env()}.oanda.com/v3/instruments/{sym}/candles?granularity=M5&count=80&price=M"
+                r5 = requests.get(url5, headers=hdr, timeout=8).json()
+                if 'candles' in r5:
+                    arr5 = []
+                    for c in r5['candles']:
+                        try:
+                            arr5.append({
+                                't': c['time'],
+                                'o': float(c['mid']['o']),
+                                'h': float(c['mid']['h']),
+                                'l': float(c['mid']['l']),
+                                'c': float(c['mid']['c']),
+                                'complete': bool(c.get('complete', False)),
+                                'volume': int(c.get('volume',0))
+                            })
+                        except Exception:
+                            continue
+                    candles_5m[sym] = sorted(arr5, key=lambda x: x['t'])
+
             except Exception as e:
-                print("Eval error:", sym, e)
+                print('Candle fetch error', sym, e)
+        await asyncio.sleep(CANDLE_FETCH_INTERVAL)
 
+# small helper to map environment to endpoint subdomain
+def oanda_env():
+    return 'fxpractice' if OANDA_ENV=='practice' else 'fx' if OANDA_ENV=='live' else OANDA_ENV
 
-@app.on_event("startup")
-async def start_event():
-    asyncio.create_task(candle_close_loop())
+# streaming websocket task
+async def stream_data():
+    global RUNNING
+    stream_url = f"wss://stream-fx{OANDA_ENV}.oanda.com/v3/accounts/{ACCOUNT_ID}/pricing/stream?instruments={','.join(SYMBOLS)}"
+    headers = [("Authorization", f"Bearer {OANDA_API_KEY}")]
+    reconnect_delay = 1
+    while True:
+        try:
+            async with websockets.connect(stream_url, extra_headers=headers) as ws:
+                print('Connected to OANDA stream')
+                reconnect_delay = 1
+                async for raw in ws:
+                    if not RUNNING:
+                        await asyncio.sleep(0.2)
+                        continue
+                    try:
+                        data = json.loads(raw)
+                    except Exception:
+                        continue
+                    if data.get('type') != 'PRICE':
+                        continue
+                    sym = data.get('instrument')
+                    if sym not in SYMBOLS:
+                        continue
+                    bid = float(data['bids'][0]['price'])
+                    ask = float(data['asks'][0]['price'])
+                    mid = (bid + ask)/2
+                    # append to tick buffer
+                    buf = tick_buffer.get(sym)
+                    buf.append(round(mid,6))
+                    if len(buf) > 500:
+                        buf.pop(0)
+                    # analyze quickly on each tick, but ensure MTF candles exist
+                    sig, conf, pat, last, atr = analyze_symbol(sym)
+                    symbol_state[sym] = {'last': last, 'signal': sig, 'confidence': conf, 'pattern': pat, 'atr': atr, 'updated': datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}
+                    # send only when signal is BUY/SELL and confidence >=85
+                    if sig in ('BUY','SELL') and conf >= 85:
+                        # check not sending duplicate same-side within short window
+                        if not recent_same_signal(sym, sig):
+                            tp, sl = compute_tp_sl(sig, last, atr)
+                            now = datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+                            msg = f"⚡ <b>{sym}</b> {sig} | Conf: {conf}%
+Price: {last}
+Pattern: {pat}
+TP: {tp} | SL: {sl}
+🕒 {now} UTC"
+                            send_telegram(msg)
+                            # record
+                            signal_history.insert(0, {'symbol': sym, 'signal': sig, 'confidence': conf, 'pattern': pat, 'price': last, 'tp': tp, 'sl': sl, 'time': now})
+                            signal_history[:] = signal_history[:200]
+                            signal_eval.append({'sent_ts': time.time(), 'symbol': sym, 'side': sig, 'entry': last, 'tp': tp, 'sl': sl, 'status': 'PENDING'})
+        except Exception as e:
+            print('Stream connection error', e)
+            await asyncio.sleep(reconnect_delay)
+            reconnect_delay = min(reconnect_delay*2, 60)
 
+# avoid sending duplicate same-side signals for same symbol within short time
+def recent_same_signal(sym, side, window_sec=30):
+    for h in signal_history[:10]:
+        if h['symbol']==sym and h['signal']==side:
+            # parse time
+            try:
+                t = datetime.datetime.strptime(h['time'],'%Y-%m-%d %H:%M:%S')
+            except Exception:
+                continue
+            if (datetime.datetime.utcnow() - t).total_seconds() < window_sec:
+                return True
+    return False
 
-# ---------- Web UI ----------
-@app.get("/", response_class=HTMLResponse)
-async def homepage():
+def compute_tp_sl(side, price, atr):
+    if atr <= 0:
+        atr = MIN_ATR
+    if side=='BUY':
+        tp = round(price + TP_ATR_MULT*atr,6)
+        sl = round(price - SL_ATR_MULT*atr,6)
+    else:
+        tp = round(price - TP_ATR_MULT*atr,6)
+        sl = round(price + SL_ATR_MULT*atr,6)
+    return tp, sl
+
+# API endpoints and startup
+@app.on_event('startup')
+async def start_tasks():
+    asyncio.create_task(fetch_candles_task())
+    asyncio.create_task(stream_data())
+    asyncio.create_task(monitor_signal_outcomes())
+
+@app.post('/toggle')
+async def toggle(request: Request):
+    global RUNNING
+    data = await request.json()
+    RUNNING = data.get('run', True)
+    return JSONResponse({'status': 'running' if RUNNING else 'stopped'})
+
+@app.get('/', response_class=HTMLResponse)
+async def home():
     html = """
-    <!doctype html>
-    <html>
-    <head>
-      <meta charset="utf-8"/>
-      <meta name="viewport" content="width=device-width,initial-scale=1"/>
-      <title>Smart Pro Signal</title>
-      <style>
-        body{background:#061219;color:#e6f0f4;font-family:Arial;padding:12px}
-        h1{text-align:center;color:#78f0b8}
-        table{width:95%;margin:auto;border-collapse:collapse}
-        th,td{border:1px solid #123;padding:6px;text-align:center}
-        th{background:#062a36}
-        td{background:#052029}
-        .buy{color:#4ef08a;font-weight:700}
-        .sell{color:#ff8b8b;font-weight:700}
-      </style>
-    </head>
-    <body>
-      <h1>💹 Smart Pro Signal (Real-Time)</h1>
-      <table>
-        <thead><tr><th>Symbol</th><th>Last</th><th>Signal</th><th>Conf%</th><th>Pattern</th><th>Updated</th></tr></thead>
-        <tbody id="body"></tbody>
-      </table>
-      <script>
-        let ws;
-        function connect(){
-          ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws');
-          ws.onmessage=(e)=>{
-            const d=JSON.parse(e.data);
-            const b=document.getElementById('body');b.innerHTML='';
-            Object.keys(d.symbols).forEach(s=>{
-              const v=d.symbols[s];
-              const tr=document.createElement('tr');
-              tr.innerHTML=`<td>${s}</td><td>${v.last||'-'}</td><td class="${v.signal==='BUY'?'buy':v.signal==='SELL'?'sell':''}">${v.signal}</td><td>${v.confidence}</td><td>${v.pattern}</td><td>${v.updated}</td>`;
-              b.appendChild(tr);
-            });
-          };
-          ws.onclose=()=>setTimeout(connect,2000);
-        }
-        connect();
-      </script>
-    </body>
-    </html>
+    <html><head><title>Smart Pro Signal v4 - High Accuracy</title>
+    <meta http-equiv='refresh' content='3'>
+    <style>body{background:#0d1117;color:#eee;font-family:Arial;text-align:center;}table{margin:auto;border-collapse:collapse;width:95%;}th,td{border:1px solid #444;padding:6px;}th{background:#161b22;} .BUY{color:#00ff80;} .SELL{color:#ff5555;} button{padding:10px 20px;background:#008cff;color:white;border:none;border-radius:6px;cursor:pointer;margin:10px;} button.stop{background:#ff4444;}</style></head><body>
+    <h2>💹 Smart Pro Signal v4 — Streaming High-Accuracy</h2>
+    <button onclick="toggle(true)">▶ Start</button><button class='stop' onclick="toggle(false)">⏸ Stop</button>
+    <table><tr><th>Symbol</th><th>Last</th><th>Signal</th><th>Conf%</th><th>Pattern</th><th>ATR</th><th>Updated (UTC)</th></tr>
     """
+    for s,v in symbol_state.items():
+        html += f"<tr><td>{s}</td><td>{v.get('last','')}</td><td class='{v.get('signal','')}'>{v.get('signal','')}</td><td>{v.get('confidence','')}%</td><td>{v.get('pattern','')}</td><td>{v.get('atr','')}</td><td>{v.get('updated','')}</td></tr>"
+    html += "</table><h3>📜 Recent Signals (most recent first)</h3><table><tr><th>Symbol</th><th>Signal</th><th>Conf%</th><th>Pattern</th><th>Price</th><th>TP</th><th>SL</th><th>Time</th></tr>"
+    for h in signal_history:
+        html += f"<tr><td>{h['symbol']}</td><td>{h['signal']}</td><td>{h['confidence']}%</td><td>{h['pattern']}</td><td>{h['price']}</td><td>{h['tp']}</td><td>{h['sl']}</td><td>{h['time']}</td></tr>"
+    html += "</table></body></html>"
     return HTMLResponse(html)
 
-
-@app.post("/start")
-async def start_run():
-    global running_flag
-    running_flag = True
-    return {"status": "started"}
-
-
-@app.post("/stop")
-async def stop_run():
-    global running_flag
-    running_flag = False
-    return {"status": "stopped"}
-
-
-@app.websocket("/ws")
-async def ws_endpoint(ws: WebSocket):
-    await ws.accept()
-    try:
-        while True:
-            await ws.send_json({"symbols": symbol_state, "history": signal_history[-50:], "_meta": {"running": running_flag}})
-            await asyncio.sleep(10)
-    except Exception:
-        try:
-            await ws.close()
-        except:
-            pass
+# Run guard: if run directly use Uvicorn (user will likely run with uvicorn main:app)
+if __name__=='__main__':
+    import uvicorn
+    uvicorn.run('main:app', host='0.0.0.0', port=8000, log_level='info')
