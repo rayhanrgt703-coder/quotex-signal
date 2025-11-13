@@ -24,16 +24,16 @@ from fastapi.responses import HTMLResponse, JSONResponse
 
 app = FastAPI(title="Smart Pro Signal (OANDA)")
 
-# -------- CONFIG (from env) ----------
-OANDA_KEY = os.getenv("3fcd3abcee574d4b6081e450bf98d969-4a3215c4edf0713b3fe9c2a5bf497c63", "").strip()
+# -------- CONFIG ----------
+OANDA_KEY = os.getenv("OANDA_API_KEY", "").strip()
 OANDA_ENV = os.getenv("OANDA_ENV", "practice").strip().lower()
 if OANDA_ENV == "live":
     OANDA_BASE = "https://api-fxtrade.oanda.com/v3"
 else:
     OANDA_BASE = "https://api-fxpractice.oanda.com/v3"
 
-TELEGRAM_TOKEN = os.getenv("8473428374:AAH_GraV2w1epaaa1ZI0d1sMuqI5jeLdMr0", "").strip()
-TELEGRAM_CHAT_ID = os.getenv("5422664137", "").strip()
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 
 # symbols
 SYMBOLS = ["EUR_USD", "GBP_USD", "USD_JPY", "USD_CAD", "AUD_USD", "USD_CHF"]
@@ -54,34 +54,44 @@ symbol_state: Dict[str, Dict[str, Any]] = {
 signal_history: List[Dict[str, Any]] = []
 running_flag = False
 
-# ---------- helpers / indicators ----------
+
+# ---------- helpers ----------
 def sma(values: List[float], period: int) -> float:
-    if not values: return 0.0
-    if len(values) < period: return sum(values)/len(values)
+    if not values:
+        return 0.0
+    if len(values) < period:
+        return sum(values) / len(values)
     return sum(values[-period:]) / period
 
+
 def ema(values: List[float], period: int) -> float:
-    if not values: return 0.0
+    if not values:
+        return 0.0
     k = 2 / (period + 1)
     e = values[0]
     for v in values[1:]:
         e = v * k + e * (1 - k)
     return e
 
+
 def compute_rsi(closes: List[float], period: int = 14) -> float:
     if len(closes) < period + 1:
         return 50.0
-    gains = []; losses = []
+    gains = []
+    losses = []
     for i in range(1, len(closes)):
-        diff = closes[i] - closes[i-1]
-        gains.append(max(diff, 0)); losses.append(max(-diff, 0))
-    gains = gains[-period:]; losses = losses[-period:]
-    avg_gain = sum(gains)/period
-    avg_loss = sum(losses)/period
+        diff = closes[i] - closes[i - 1]
+        gains.append(max(diff, 0))
+        losses.append(max(-diff, 0))
+    gains = gains[-period:]
+    losses = losses[-period:]
+    avg_gain = sum(gains) / period
+    avg_loss = sum(losses) / period
     if avg_loss == 0:
         return 100.0 if avg_gain > 0 else 50.0
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
+
 
 def macd_and_hist(closes: List[float], fast=12, slow=26, signal=9):
     if len(closes) < slow + 1:
@@ -89,40 +99,43 @@ def macd_and_hist(closes: List[float], fast=12, slow=26, signal=9):
     macd_line = ema(closes, fast) - ema(closes, slow)
     macd_series = []
     if len(closes) >= slow + signal:
-        window = closes[-(slow+signal):]
+        window = closes[-(slow + signal):]
         for i in range(signal, len(window)):
-            sub = window[:i+1]
+            sub = window[: i + 1]
             macd_series.append(ema(sub, fast) - ema(sub, slow))
     signal_line = ema(macd_series, signal) if macd_series else 0.0
     hist = macd_line - signal_line
     return macd_line, hist
 
+
 def bollinger(closes: List[float], period: int = 20, mult: float = 2.0):
     if len(closes) < period:
         return None, None, None
     window = closes[-period:]
-    mid = sum(window)/period
-    var = sum((x-mid)**2 for x in window)/period
+    mid = sum(window) / period
+    var = sum((x - mid) ** 2 for x in window) / period
     sd = math.sqrt(var)
-    return mid, mid + mult*sd, mid - mult*sd
+    return mid, mid + mult * sd, mid - mult * sd
+
 
 def detect_pattern(c):
-    o,h,l,cl = c["o"], c["h"], c["l"], c["c"]
+    o, h, l, cl = c["o"], c["h"], c["l"], c["c"]
     body = abs(cl - o)
     rng = h - l if (h - l) != 0 else 1e-9
     upper = h - max(o, cl)
     lower = min(o, cl) - l
-    if body/rng < 0.12:
+    if body / rng < 0.12:
         return "Doji"
-    if lower > body*2 and upper < body:
+    if lower > body * 2 and upper < body:
         return "Hammer"
-    if upper > body*2 and lower < body:
+    if upper > body * 2 and lower < body:
         return "Inverted Hammer"
     if cl > o and (cl - o) > body * 1.5:
         return "Bullish Engulfing"
     if o > cl and (o - cl) > body * 1.5:
         return "Bearish Engulfing"
     return "-"
+
 
 # ---------- OANDA fetch ----------
 def fetch_oanda_candles(instrument: str, granularity: str = "M1", count: int = FETCH_COUNT):
@@ -139,31 +152,46 @@ def fetch_oanda_candles(instrument: str, granularity: str = "M1", count: int = F
         candles = []
         for c in data["candles"]:
             if "mid" in c:
-                o = float(c["mid"]["o"]); h = float(c["mid"]["h"]); l = float(c["mid"]["l"]); cl = float(c["mid"]["c"])
+                o = float(c["mid"]["o"])
+                h = float(c["mid"]["h"])
+                l = float(c["mid"]["l"])
+                cl = float(c["mid"]["c"])
             else:
-                o = float(c["o"]); h = float(c["h"]); l = float(c["l"]); cl = float(c["c"])
+                o = float(c["o"])
+                h = float(c["h"])
+                l = float(c["l"])
+                cl = float(c["c"])
             candles.append({"o": o, "h": h, "l": l, "c": cl, "time": c.get("time"), "complete": c.get("complete", True)})
         return candles
     except Exception as e:
         return {"error": str(e)}
+
 
 # ---------- scoring ----------
 def score_from_indicators(ind):
     score = 0.0
     score += WEIGHTS["sma"] if ind["sma5"] > ind["sma20"] else -WEIGHTS["sma"]
     score += WEIGHTS["macd"] if ind["macd"] > 0 else -WEIGHTS["macd"]
-    if ind["rsi"] > 55: score += WEIGHTS["rsi"]
-    elif ind["rsi"] < 45: score -= WEIGHTS["rsi"]
+    if ind["rsi"] > 55:
+        score += WEIGHTS["rsi"]
+    elif ind["rsi"] < 45:
+        score -= WEIGHTS["rsi"]
     if ind["bb_mid"] is not None:
-        if ind["last"] > ind["bb_mid"]: score += WEIGHTS["bb"]
-        else: score -= WEIGHTS["bb"]
-    if ind["momentum"] > 0: score += WEIGHTS["momentum"]
-    elif ind["momentum"] < 0: score -= WEIGHTS["momentum"]
+        if ind["last"] > ind["bb_mid"]:
+            score += WEIGHTS["bb"]
+        else:
+            score -= WEIGHTS["bb"]
+    if ind["momentum"] > 0:
+        score += WEIGHTS["momentum"]
+    elif ind["momentum"] < 0:
+        score -= WEIGHTS["momentum"]
     return score
+
 
 def normalize_conf(score):
     normalized = (score + TOTAL_WEIGHT) / (2 * TOTAL_WEIGHT)
     return max(0.0, min(100.0, normalized * 100.0))
+
 
 # ---------- evaluation ----------
 def evaluate_symbol(symbol: str):
@@ -208,7 +236,7 @@ def evaluate_symbol(symbol: str):
 
     recent_ok = True
     try:
-        diffs = [closes1[-i] - closes1[-i-1] for i in range(1,4)]
+        diffs = [closes1[-i] - closes1[-i - 1] for i in range(1, 4)]
         signs = [1 if d > 0 else (-1 if d < 0 else 0) for d in diffs]
         if dir1 != 0:
             same = sum(1 for s in signs if s == dir1)
@@ -233,8 +261,9 @@ def evaluate_symbol(symbol: str):
         "confidence": final_conf,
         "pattern": ind1["pattern"],
         "ind1": ind1,
-        "ind5": ind5
+        "ind5": ind5,
     }
+
 
 # ---------- Telegram ----------
 def send_telegram_message(text: str):
@@ -247,15 +276,19 @@ def send_telegram_message(text: str):
     except Exception as e:
         print("Telegram send error:", e)
 
+
 def format_signal_message(sym: str, sig: str, conf: float, patt: str, price: float, now: str):
-    return (f"💹 <b>Smart Pro Signal</b>\nPair: <b>{sym}</b>\nSignal: <b>{sig}</b>\nConfidence: <b>{conf}%</b>\nPattern: <b>{patt}</b>\nPrice: <b>{price}</b>\nTime: <b>{now}</b>")
+    return (
+        f"💹 <b>Smart Pro Signal</b>\nPair: <b>{sym}</b>\nSignal: <b>{sig}</b>\nConfidence: <b>{conf}%</b>\nPattern: <b>{patt}</b>\nPrice: <b>{price}</b>\nTime: <b>{now}</b>"
+    )
+
 
 # ---------- Candle-close loop ----------
 async def candle_close_loop():
     global running_flag
     while True:
         now = datetime.datetime.utcnow()
-        secs = 60 - now.second - now.microsecond/1_000_000 + 0.6
+        secs = 60 - now.second - now.microsecond / 1_000_000 + 0.6
         await asyncio.sleep(secs)
         if not running_flag:
             continue
@@ -266,28 +299,36 @@ async def candle_close_loop():
                     symbol_state[sym].update({"last": None, "signal": "WAIT", "confidence": 0.0, "pattern": "-", "updated": "-"})
                     continue
                 if "error" in res:
-                    symbol_state[sym].update({"last": None, "signal": "WAIT", "confidence": 0.0, "pattern": "-", "updated": f"ERR"})
+                    symbol_state[sym].update({"last": None, "signal": "WAIT", "confidence": 0.0, "pattern": "-", "updated": "ERR"})
                     print("OANDA error for", sym, res["error"])
                     continue
 
                 now_local = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 prev = symbol_state.get(sym, {}).copy()
-                symbol_state[sym].update({
-                    "last": res["last"],
-                    "signal": res["signal"],
-                    "confidence": res["confidence"],
-                    "pattern": res["pattern"],
-                    "updated": now_local
-                })
+                symbol_state[sym].update(
+                    {
+                        "last": res["last"],
+                        "signal": res["signal"],
+                        "confidence": res["confidence"],
+                        "pattern": res["pattern"],
+                        "updated": now_local,
+                    }
+                )
 
-                if res["signal"] in ("BUY","SELL") and res["confidence"] >= HIGH_CONF:
+                if res["signal"] in ("BUY", "SELL") and res["confidence"] >= HIGH_CONF:
                     send_flag = False
                     if prev.get("signal") != res["signal"]:
                         send_flag = True
                     elif abs(prev.get("confidence", 0) - res["confidence"]) >= 1.0:
                         send_flag = True
                     if send_flag:
-                        record = {"symbol": sym, "signal": res["signal"], "confidence": res["confidence"], "pattern": res["pattern"], "time": now_local}
+                        record = {
+                            "symbol": sym,
+                            "signal": res["signal"],
+                            "confidence": res["confidence"],
+                            "pattern": res["pattern"],
+                            "time": now_local,
+                        }
                         signal_history.append(record)
                         if len(signal_history) > HISTORY_LIMIT:
                             signal_history.pop(0)
@@ -298,15 +339,17 @@ async def candle_close_loop():
                 print("evaluate error", sym, e)
                 await asyncio.sleep(0.5)
 
+
 # ---------- Startup ----------
 @app.on_event("startup")
 async def startup_event():
     asyncio.create_task(candle_close_loop())
 
+
 # ---------- Web UI ----------
 @app.get("/", response_class=HTMLResponse)
 async def homepage():
-    html = f"""
+    html = """
     <!doctype html>
     <html>
     <head>
@@ -315,18 +358,18 @@ async def homepage():
       <title>Smart Pro Signal v2.0 (OANDA)</title>
       <meta http-equiv="refresh" content="10">
       <style>
-        body{{font-family:Arial,Helvetica,sans-serif;background:#061219;color:#e6f0f4;padding:12px}}
-        h1{{text-align:center;color:#78f0b8}}
-        .controls{{display:flex;justify-content:center;gap:8px;margin-bottom:10px}}
-        .btn{{padding:8px 14px;border-radius:6px;background:#0b84ff;color:#fff;border:none;cursor:pointer}}
-        .btn.stop{{background:#ff4d4f}}
-        table{{width:95%;margin:8px auto;border-collapse:collapse}}
-        th,td{{padding:8px;border:1px solid #123;text-align:center}}
-        th{{background:#062a36}}
-        td{{background:#052029}}
-        .buy{{color:#4ef08a;font-weight:700}}
-        .sell{{color:#ff8b8b;font-weight:700}}
-        .small{{font-size:12px;color:#9fb3c8}}
+        body{font-family:Arial,Helvetica,sans-serif;background:#061219;color:#e6f0f4;padding:12px}
+        h1{text-align:center;color:#78f0b8}
+        .controls{display:flex;justify-content:center;gap:8px;margin-bottom:10px}
+        .btn{padding:8px 14px;border-radius:6px;background:#0b84ff;color:#fff;border:none;cursor:pointer}
+        .btn.stop{background:#ff4d4f}
+        table{width:95%;margin:8px auto;border-collapse:collapse}
+        th,td{padding:8px;border:1px solid #123;text-align:center}
+        th{background:#062a36}
+        td{background:#052029}
+        .buy{color:#4ef08a;font-weight:700}
+        .sell{color:#ff8b8b;font-weight:700}
+        .small{font-size:12px;color:#9fb3c8}
       </style>
     </head>
     <body>
@@ -337,7 +380,7 @@ async def homepage():
         <button class="btn" onclick="clearHist()">🧹 Clear History</button>
       </div>
 
-      <div id="status" style="text-align:center;margin-bottom:8px">Running: <span id="runFlag">{running_flag}</span></div>
+      <div id="status" style="text-align:center;margin-bottom:8px">Running: <span id="runFlag"></span></div>
       <table>
         <thead><tr><th>Symbol</th><th>Last</th><th>Signal</th><th>Conf%</th><th>Pattern</th><th>Updated</th></tr></thead>
         <tbody id="body"></tbody>
@@ -352,73 +395,4 @@ async def homepage():
       <script>
         let ws=null;
         function connect(){
-          ws = new WebSocket((location.protocol==='https:'?'wss://':'ws://') + location.host + '/ws');
-          ws.onopen = ()=>console.log('ws open');
-          ws.onmessage = (e)=>{
-            const d = JSON.parse(e.data);
-            document.getElementById('runFlag').innerText = d._meta.running;
-            const body = document.getElementById('body'); body.innerHTML='';
-            Object.keys(d.symbols).forEach(sym=>{
-              const s = d.symbols[sym];
-              const tr = document.createElement('tr');
-              let cls='';
-              if(s.signal==='BUY') cls='buy';
-              else if(s.signal==='SELL') cls='sell';
-              tr.innerHTML = `<td>${sym}</td><td>${s.last===null?'-':s.last}</td><td class="${cls}">${s.signal}</td><td>${s.confidence}%</td><td class="small">${s.pattern}</td><td class="small">${s.updated}</td>`;
-              body.appendChild(tr);
-            });
-            const hist = document.getElementById('histbody'); hist.innerHTML='';
-            (d.history || []).slice().reverse().forEach(h=>{
-              const r = document.createElement('tr');
-              r.innerHTML = `<td>${h.symbol}</td><td class="${h.signal==='BUY'?'buy':'sell'}">${h.signal}</td><td>${h.confidence}%</td><td>${h.pattern}</td><td class="small">${h.time}</td>`;
-              hist.appendChild(r);
-            });
-          }
-          ws.onclose = ()=>{ console.log('ws closed, reconnecting...'); setTimeout(connect,2000); }
-        }
-        connect();
-        function startRun(){ fetch('/start',{method:'POST'}); }
-        function stopRun(){ fetch('/stop',{method:'POST'}); }
-        function clearHist(){ fetch('/history/clear',{method:'POST'}); }
-      </script>
-    </body>
-    </html>
-    """
-    return HTMLResponse(html)
-
-@app.post("/start")
-async def api_start():
-    global running_flag
-    running_flag = True
-    return JSONResponse({"status":"started"})
-
-@app.post("/stop")
-async def api_stop():
-    global running_flag
-    running_flag = False
-    return JSONResponse({"status":"stopped"})
-
-@app.post("/history/clear")
-async def api_history_clear():
-    global signal_history
-    signal_history = []
-    return JSONResponse({"status":"cleared"})
-
-# ---------- websocket endpoint (push every 10s) ----------
-@app.websocket("/ws")
-async def websocket_endpoint(ws: WebSocket):
-    await ws.accept()
-    try:
-        while True:
-            payload = {"symbols": symbol_state, "history": signal_history[-200:], "_meta": {"running": running_flag}}
-            await ws.send_json(payload)
-            await asyncio.sleep(10)  # 10 second push for UI realtime
-    except Exception:
-        try:
-            await ws.close()
-        except:
-            pass
-
-@app.get("/api/status")
-async def api_status():
-    return {"running": running_flag, "symbols": symbol_state, "history_count": len(signal_history)}
+          ws = new WebSocket((location.protocol==='https:'?'wss
