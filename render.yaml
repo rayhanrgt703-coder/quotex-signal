@@ -1,11 +1,10 @@
 services:
   - type: web
-    name: oanda-premium-signal
+    name: smart-pro-signal-oanda
     env: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
-    autoDeploy: true
+    startCommand: uvicorn main:app --host 0.0.0.0 --port 10000
     envVars:
       - key: OANDA_TOKEN
         sync: false
@@ -14,7 +13,7 @@ services:
       - key: OANDA_ENV
         value: practice
       - key: INSTRUMENTS
-        value: EUR_USD,GBP_USD,USD_JPY,USD_CAD,AUD_USD,USD_CHF
+        value: "EUR_USD,GBP_USD,USD_JPY,USD_CAD,AUD_USD,USD_CHF"
       - key: TELEGRAM_TOKEN
         sync: false
       - key: TELEGRAM_CHAT_ID
