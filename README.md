@@ -1,77 +1,62 @@
-# 🔥 OANDA Premium Real-Time Signal Bot (FastAPI + WebSocket)
+# Premium OANDA Real-Time Forex Signal System
 
-This bot uses:
-- Live OANDA Tick Stream (0.1–0.3s delay)
-- M1 + M5 Confirmation
-- ATR + ADX Trend Filters
+## 🔥 Features
+- OANDA Tick-by-Tick Streaming (0.1s delay)
+- Auto M1 Candle Builder
+- Auto M5 Candle Builder
 - Market Structure Detection (HH/HL/LH/LL)
-- Candlestick Pattern Engine (Hammer, Pinbar, Engulfing, Star, Doji)
-- Bollinger + RSI + MACD + MA Filters
-- Telegram Signal Alerts
-- WebSocket Live Feed
-- Auto Reconnect & Backoff
-- Render Deploy Ready
+- Indicators:
+  - MA50
+  - RSI14
+  - MACD (12,26,9)
+  - Bollinger Bands 20
+  - ATR 14
+  - ADX 14
+- Candlestick Pattern Detection:
+  - Hammer
+  - Shooting Star
+  - Pin Bar
+  - Doji
+  - Bullish/Bearish Engulfing
+- Smart Signal Generator (85%–95% confidence)
+- Telegram Signal Alerts (Instant)
+- WebSocket Live Broadcasting (/ws)
+- REST API:
+  - `/signals` → recent signals
+  - `/` → status page
 
 ---
 
-## ✔ Default Pairs
-The bot includes the following pairs automatically:
+## 🚀 How to Deploy to Render.com
 
-- EUR_USD  
-- GBP_USD  
-- USD_JPY  
-- USD_CAD  
-- AUD_USD  
-- USD_CHF  
+1. Upload these files:
+   - main.py
+   - requirements.txt
+   - render.yaml
+   - README.md
 
-You can edit pairs using Render → Environment Variables:
+2. Go to **Render → Create Web Service → Connect Repository**
 
+3. Set Environment Variables:
+   - **OANDA_TOKEN**
+   - **OANDA_ACCOUNT**
+   - **OANDA_ENV** = practice
+   - **INSTRUMENTS** = EUR_USD,GBP_USD,USD_JPY,USD_CAD,AUD_USD,USD_CHF
+   - **TELEGRAM_TOKEN**
+   - **TELEGRAM_CHAT_ID**
 
----
+4. Deploy.
 
-## ✔ Environment Variables (Required)
-
-| Variable | Description |
-|---------|-------------|
-| OANDA_TOKEN | Your personal OANDA API token |
-| OANDA_ACCOUNT | Your OANDA account ID |
-| OANDA_ENV | practice or trade |
-| INSTRUMENTS | Comma separated OANDA pairs |
-| TELEGRAM_TOKEN | (Optional) Telegram bot token |
-| TELEGRAM_CHAT_ID | (Optional) Telegram Chat ID |
+Render will auto-start the stream on startup.
 
 ---
 
-## ✔ Deploy Instructions (Render.com)
-
-1. Create new **Web Service** in Render  
-2. Upload ZIP (containing `main.py`, `requirements.txt`, `render.yaml`, `README.md`)  
-3. Set environment variables  
-4. Deploy  
-5. Open your URL → streaming starts automatically
+## 🟢 Live Endpoints
+- `https://your-service.onrender.com/`
+- `https://your-service.onrender.com/ws`
+- `https://your-service.onrender.com/signals`
 
 ---
 
-## ✔ API Routes
-
-### Start Stream manually
-
-### Get Last Signals
-
-### WebSocket Live Feed
-
----
-
-## ✔ Auto Start on Boot
-The bot automatically starts streaming when deployed.
-
----
-
-## ⭐ Accuracy
-With M1+M5 confirmation + ATR/ADX + Candlestick filter:
-**80%–90% realistic accuracy** (trend markets)
-
----
-
-## Support
-For upgrades, pattern tuning, VPS optimization, or custom dashboard — ask in ChatGPT.
+## 🙏 Credits
+Developed for premium real-time forex signal automation.
