@@ -1,16 +1,21 @@
 services:
   - type: web
-    name: smart-pro-signal-oanda
+    name: oanda-premium-signal-bot
     env: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn main:app --host 0.0.0.0 --port 10000
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+
     envVars:
-      - key: OANDA_API_KEY
+      - key: OANDA_TOKEN
         sync: false
+      - key: OANDA_ACCOUNT
+        sync: false
+      - key: OANDA_ENV
+        value: practice
+      - key: INSTRUMENTS
+        value: EUR_USD,GBP_USD,USD_JPY,USD_CAD,AUD_USD,USD_CHF
       - key: TELEGRAM_TOKEN
         sync: false
       - key: TELEGRAM_CHAT_ID
         sync: false
-      - key: OANDA_ENV
-        value: practice
