@@ -3,16 +3,10 @@ services:
     name: smart-pro-signal-oanda
     env: python
     plan: free
-
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port 10000
-
     envVars:
-      - key: OANDA_TOKEN
-        sync: false
-      - key: OANDA_ACCOUNT
-        sync: false
-      - key: INSTRUMENTS
+      - key: OANDA_API_KEY
         sync: false
       - key: TELEGRAM_TOKEN
         sync: false
