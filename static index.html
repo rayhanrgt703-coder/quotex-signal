@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Real-Time Forex Signal</title>
+    <style>
+        body { font-family: Arial; padding: 20px; background: #111; color: #fff; }
+        table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+        th, td { padding: 10px; border: 1px solid #444; text-align: center; }
+        th { background: #222; }
+        .buy { color: #00ff00; font-weight: bold; }
+        .sell { color: #ff4444; font-weight: bold; }
+    </style>
+</head>
+<body>
+
+<h2>📡 Real-Time OANDA Forex Signals</h2>
+
+<table>
+    <thead>
+        <tr>
+            <th>Time</th>
+            <th>Symbol</th>
+            <th>Signal</th>
+            <th>Confidence</th>
+            <th>Patterns</th>
+        </tr>
+    </thead>
+    <tbody id="signalTable"></tbody>
+</table>
+
+<script>
+    const ws = new WebSocket("wss://" + window.location.host + "/ws");
+
+    ws.onmessage = function(event) {
+        const data = JSON.parse(event.data);
+        const table = document.getElementById("signalTable");
+
+        const row = document.createElement("tr");
+
+        row.innerHTML = `
+            <td>${new Date().toLocaleTimeString()}</td>
+            <td>${data.symbol}</td>
+            <td class="${data.signal === 'BUY' ? 'buy' : 'sell'}">${data.signal || '-'}</td>
+            <td>${data.confidence || '-'}</td>
+            <td>${(data.patterns || []).join(", ")}</td>
+        `;
+
+        table.prepend(row);
+    };
+</script>
+
+</body>
+</html>
