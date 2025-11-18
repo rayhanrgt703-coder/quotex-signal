@@ -1,13 +1,12 @@
 # main.py
 """
-Realtime OANDA streaming signal engine
-- Auto-start (middleware) for Render
-- Tick-by-tick stream -> M1 / M5 candles -> indicators -> signals
-- WebSocket (/ws) broadcast, REST /signals, /candles
-- Async Telegram alerting
+Candle-close signal engine (M1 close -> signal)
+- OANDA streaming (tick-by-tick) -> M1 aggregator -> indicators -> signal on candle close
+- WebSocket broadcast, /signals, /candles endpoints
+- Auto-start on boot (middleware)
 """
 
-import os, asyncio, json, math, traceback
+import os, asyncio, json, math, traceback, time
 from collections import deque
 from datetime import datetime
 from typing import Optional
@@ -16,13 +15,14 @@ import httpx
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
+app = FastAPI()
+
 # -----------------------
-# CONFIG / ENV (sanitize)
+# Configuration (env)
 # -----------------------
-OANDA_TOKEN = (os.getenv("OANDA_TOKEN") or "").strip()   # MUST set in Render secrets
-# Default account provided by you; can be overridden by env var OANDA_ACCOUNT
+OANDA_TOKEN = (os.getenv("OANDA_TOKEN") or "").strip()
 OANDA_ACCOUNT = (os.getenv("OANDA_ACCOUNT") or "101-004-37656768-001").strip()
-OANDA_ENV = (os.getenv("OANDA_ENV") or "practice").strip()  # practice or trade
+OANDA_ENV = (os.getenv("OANDA_ENV") or "practice").strip()
 INSTRUMENTS = (os.getenv("INSTRUMENTS") or "EUR_USD,GBP_USD,USD_JPY,USD_CAD,AUD_USD,USD_CHF").replace(" ", "")
 INSTRUMENTS_LIST = [s for s in INSTRUMENTS.split(",") if s]
 
@@ -43,34 +43,37 @@ MIN_ATR_THRESHOLD = {
 M5_CONFIRMATION_REQUIRED = True
 
 # -----------------------
-# STATE
+# State
 # -----------------------
-app = FastAPI()
-clients = set()                   # websocket clients
-aggs = {}                         # symbol -> TF_Agg
-symbol_state = {}                 # latest state per symbol
-signal_history = deque(maxlen=500)
+clients = set()                         # websocket clients
+aggs = {}                               # per-symbol aggregator
+symbol_state = {}                       # latest state per symbol
+signal_history = deque(maxlen=500)      # recent signals
 stream_task: Optional[asyncio.Task] = None
 FIRST_RUN = True
 
 # -----------------------
-# UTIL
+# Helpers
 # -----------------------
-def sma(arr): return sum(arr) / len(arr) if arr else None
-def safe_minatr(sym): return MIN_ATR_THRESHOLD.get(sym, 0.00005)
+def sma(arr):
+    return sum(arr)/len(arr) if arr else None
+
+def safe_minatr(sym):
+    return MIN_ATR_THRESHOLD.get(sym, 0.00005)
 
 # -----------------------
-# Candle pattern detection
+# Candlestick pattern detection
 # -----------------------
 def detect_candle_pattern(c):
+    # c: {'open','high','low','close'}
+    o = c.get('open'); h = c.get('high'); l = c.get('low'); close = c.get('close')
     try:
-        o = c['open']; h = c['high']; l = c['low']; close = c['close']
+        body = abs(close - o)
+        total = (h - l) if (h - l) != 0 else 1e-9
+        upper = h - max(o, close)
+        lower = min(o, close) - l
     except Exception:
         return None
-    body = abs(close - o)
-    total = h - l if h != l else 1e-9
-    upper = h - max(o, close)
-    lower = min(o, close) - l
     if body <= total * 0.10:
         return "DOJI"
     if lower > body * 2 and upper < body:
@@ -84,7 +87,7 @@ def detect_candle_pattern(c):
     return None
 
 # -----------------------
-# Indicators engine
+# Indicators engine (incremental)
 # -----------------------
 class Indicators:
     def __init__(self):
@@ -111,15 +114,12 @@ class Indicators:
             up = h - self.highs[-2]; down = self.lows[-2] - l
             self.plus_dm.append(up if up>down and up>0 else 0)
             self.minus_dm.append(down if down>up and down>0 else 0)
-        # ATR smoothing
         if len(self.tr) >= ATR_PERIOD:
             if self.atr is None:
                 self.atr = sum(list(self.tr)[-ATR_PERIOD:]) / ATR_PERIOD
             else:
                 self.atr = (self.atr*(ATR_PERIOD-1) + self.tr[-1]) / ATR_PERIOD
-        # ADX
         self._update_adx()
-        # MACD incremental
         self._update_macd(c)
         return self.compute_basic()
 
@@ -128,7 +128,8 @@ class Indicators:
             plus = sum(list(self.plus_dm)[-ADX_PERIOD:])
             minus = sum(list(self.minus_dm)[-ADX_PERIOD:])
             trsum = sum(list(self.tr)[-ADX_PERIOD:])
-            if trsum == 0: return
+            if trsum == 0:
+                return
             pdi = 100 * (plus / trsum); mdi = 100 * (minus / trsum)
             dx = 100 * (abs(pdi - mdi) / (pdi + mdi)) if (pdi + mdi) != 0 else 0
             self.dx.append(dx)
@@ -154,7 +155,6 @@ class Indicators:
     def compute_basic(self):
         res = {}
         res['ma'] = sma(list(self.prices)[-50:]) if len(self.prices) >= 50 else None
-        # RSI 14
         if len(self.prices) >= 15:
             arr = list(self.prices)[-15:]; gains=[]; losses=[]
             for i in range(1,len(arr)):
@@ -165,14 +165,12 @@ class Indicators:
             res['rsi'] = 100 - 100/(1+rs)
         else:
             res['rsi'] = None
-        # Bollinger
         if len(self.prices) >= 20:
             arr = list(self.prices)[-20:]; m = sma(arr)
             sd = math.sqrt(sum((p-m)**2 for p in arr)/20)
             res['bb'] = {'upper': m+2*sd, 'mid': m, 'lower': m-2*sd}
         else:
             res['bb'] = None
-        # MACD
         if self.macd_signal is not None and self.macd_hist_list:
             macd_line = self.macd_hist_list[-1]
             res['macd'] = {'macd': macd_line, 'signal': self.macd_signal, 'hist': macd_line - self.macd_signal}
@@ -183,7 +181,7 @@ class Indicators:
         return res
 
 # -----------------------
-# TF Aggregator (M1 / M5)
+# TF Aggregation M1/M5
 # -----------------------
 class TF_Agg:
     def __init__(self):
@@ -210,6 +208,7 @@ class TF_Agg:
         m1 = {'open': candle['open'], 'high': candle['high'], 'low': candle['low'], 'close': candle['close'], 'time': candle['start']}
         self.m1_history.append(m1)
         ind_m1 = self.ind_m1.update_with_candle(m1['open'], m1['high'], m1['low'], m1['close'])
+        # build M5 from last 5 m1
         if len(self.m1_history) >= 5:
             last5 = list(self.m1_history)[-5:]
             m5 = {'start': last5[0]['time'], 'open': last5[0]['open'], 'high': max(x['high'] for x in last5), 'low': min(x['low'] for x in last5), 'close': last5[-1]['close']}
@@ -224,7 +223,7 @@ class TF_Agg:
         if highs[-1] < highs[-3] and lows[-1] < lows[-3]: return 'LH_LL'
         return 'RANGE'
 
-# create aggs for symbols
+# create aggregators
 for sym in INSTRUMENTS_LIST:
     aggs[sym] = TF_Agg()
 
@@ -234,79 +233,112 @@ for sym in INSTRUMENTS_LIST:
 async def broadcast(msg):
     if not clients: return
     text = json.dumps(msg, default=str)
+    coros = []
     bad = []
     for ws in list(clients):
         try:
-            await ws.send_text(text)
+            coros.append(ws.send_text(text))
         except Exception:
             bad.append(ws)
-    for w in bad: clients.discard(w)
+    if coros:
+        await asyncio.gather(*coros, return_exceptions=True)
+    for w in bad:
+        clients.discard(w)
 
 # -----------------------
-# Signal logic
+# Signal generation (on candle close)
 # -----------------------
-def signal_from_indicators(symbol, candle, ind_m1, m5_ind, structure, prev_m1):
+def signal_from_indicators(symbol, candle, ind_m1, m5_ind, structure, prev_m1=None):
     if ind_m1 is None: return None
     ma = ind_m1.get('ma'); rsi = ind_m1.get('rsi'); macd = ind_m1.get('macd'); atr = ind_m1.get('atr'); adx = ind_m1.get('adx')
     price = candle['close']
-    if ma is None or rsi is None or macd is None: return None
+    if ma is None or rsi is None or macd is None:
+        return None
+
+    # M1 baseline side
     m1_side = None
-    if price > ma and rsi > 55 and macd.get('hist',0) > 0:
+    if price > ma and rsi > 55 and macd and macd.get('hist') is not None and macd['hist'] > 0:
         m1_side = 'BUY'
-    elif price < ma and rsi < 45 and macd.get('hist',0) < 0:
+    elif price < ma and rsi < 45 and macd and macd.get('hist') is not None and macd['hist'] < 0:
         m1_side = 'SELL'
     else:
         return None
+
+    # M5 confirmation if required
     if M5_CONFIRMATION_REQUIRED:
-        if m5_ind is None: return None
+        if m5_ind is None:
+            return None
         m5_side = None
-        if m5_ind.get('ma') and price > m5_ind['ma'] and m5_ind.get('macd') and m5_ind['macd'].get('hist',0) > 0:
+        if m5_ind.get('ma') and price > m5_ind['ma'] and m5_ind.get('macd') and m5_ind['macd'].get('hist') and m5_ind['macd']['hist'] > 0:
             m5_side = 'BUY'
-        if m5_ind.get('ma') and price < m5_ind['ma'] and m5_ind.get('macd') and m5_ind['macd'].get('hist',0) < 0:
+        if m5_ind.get('ma') and price < m5_ind['ma'] and m5_ind.get('macd') and m5_ind['macd'].get('hist') and m5_ind['macd']['hist'] < 0:
             m5_side = 'SELL'
-        if m5_side != m1_side: return None
-    if atr is None or atr < safe_minatr(symbol): return None
-    if adx is None or adx < ADX_THRESHOLD: return None
-    if structure == 'RANGE': return None
+        if m5_side != m1_side:
+            return None
+
+    # volatility & ADX filters
+    if atr is None or atr < safe_minatr(symbol):
+        return None
+    if adx is None or adx < ADX_THRESHOLD:
+        return None
+    if structure == 'RANGE':
+        return None
+
+    # candlestick pattern integration
     pattern = detect_candle_pattern(candle)
-    # engulfing
+    # engulfing detection
     if prev_m1:
-        if candle['close'] > candle['open'] and prev_m1['close'] < prev_m1['open']:
-            if candle['close'] > prev_m1['open'] and candle['open'] < prev_m1['close']:
-                pattern = "BULLISH_ENGULFING"
-        if candle['close'] < candle['open'] and prev_m1['close'] > prev_m1['open']:
-            if candle['open'] > prev_m1['close'] and candle['close'] < prev_m1['open']:
-                pattern = "BEARISH_ENGULFING"
+        prev_body = abs(prev_m1['close'] - prev_m1['open'])
+        if candle['close'] > candle['open'] and prev_m1['close'] < prev_m1['open'] and (candle['close'] > prev_m1['open'] and candle['open'] < prev_m1['close']):
+            pattern = "BULLISH_ENGULFING"
+        if candle['close'] < candle['open'] and prev_m1['close'] > prev_m1['open'] and (candle['open'] > prev_m1['close'] and candle['close'] < prev_m1['open']):
+            pattern = "BEARISH_ENGULFING"
+
     pattern_bias = None
-    if pattern in ["HAMMER","BULLISH_PINBAR","BULLISH_ENGULFING"]: pattern_bias = "BUY"
-    if pattern in ["SHOOTING_STAR","BEARISH_PINBAR","BEARISH_ENGULFING"]: pattern_bias = "SELL"
-    if pattern == "DOJI": return None
-    if pattern_bias and pattern_bias != m1_side: return None
+    if pattern in ["HAMMER","BULLISH_PINBAR","BULLISH_ENGULFING"]:
+        pattern_bias = "BUY"
+    elif pattern in ["SHOOTING_STAR","BEARISH_PINBAR","BEARISH_ENGULFING"]:
+        pattern_bias = "SELL"
+    elif pattern == "DOJI":
+        return None
+
+    if pattern_bias and pattern_bias != m1_side:
+        return None
+
+    # compute confidence
     confidence = 85
-    if adx and adx > ADX_THRESHOLD + 10: confidence += 4
-    if atr and atr > safe_minatr(symbol) * 3: confidence += 3
-    if pattern_bias: confidence += 3
-    return {"side": m1_side, "confidence": min(confidence,95), "pattern": pattern, "atr": atr, "adx": adx}
+    if atr and adx:
+        if adx > (ADX_THRESHOLD + 10):
+            confidence += 3
+        if atr > safe_minatr(symbol) * 3:
+            confidence += 2
+    if pattern_bias:
+        confidence += 3
+
+    return {'side': m1_side, 'confidence': min(confidence, 95), 'atr': atr, 'adx': adx, 'pattern': pattern, 'structure': structure}
 
 # -----------------------
-# Async telegram (non-blocking)
+# Telegram async send
 # -----------------------
 async def send_telegram(symbol, signal, state):
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    txt = (f"📊 <b>{symbol}</b>\nSignal: <b>{signal.get('side')}</b>\n"
+           f"Confidence: {signal.get('confidence')}%\nPattern: {signal.get('pattern')}\n"
+           f"ADX: {signal.get('adx')}\nATR: {signal.get('atr')}\nTime: {state.get('time')}")
     try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        txt = (f"📊 <b>{symbol}</b>\nSignal: <b>{signal.get('side')}</b>\nConfidence: {signal.get('confidence')}%\nPattern: {signal.get('pattern')}\nADX: {signal.get('adx')}\nATR: {signal.get('atr')}\nTime: {state.get('time')}")
         async with httpx.AsyncClient() as client:
-            await client.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": txt, "parse_mode": "HTML"}, timeout=10.0)
+            await client.post(url, json={'chat_id': TELEGRAM_CHAT_ID, 'text': txt, 'parse_mode': 'HTML'}, timeout=10.0)
     except Exception as e:
         print("telegram send error:", e)
 
 # -----------------------
-# OANDA streaming worker (httpx streaming)
+# OANDA streaming worker
 # -----------------------
 async def oanda_stream_worker():
     if not OANDA_TOKEN or not OANDA_ACCOUNT:
-        print("OANDA_TOKEN or OANDA_ACCOUNT missing — cannot start stream.")
+        print("OANDA_TOKEN or OANDA_ACCOUNT missing — stream will not start.")
         return
     url = OANDA_STREAM_URL.format(account_id=OANDA_ACCOUNT)
     params = {"instruments": ",".join(INSTRUMENTS_LIST)}
@@ -321,8 +353,8 @@ async def oanda_stream_worker():
                     if resp.status_code != 200:
                         try:
                             body = await resp.aread()
-                            print("Non-200 response body (truncated):", (body[:1000] if body else None))
-                        except Exception:
+                            print("Non-200 body (truncated):", (body[:1000] if body else None))
+                        except:
                             pass
                         await asyncio.sleep(backoff)
                         backoff = min(backoff*2, 60)
@@ -330,65 +362,71 @@ async def oanda_stream_worker():
                     print(">>> Connected to OANDA stream.")
                     backoff = 1
                     async for raw in resp.aiter_lines():
-                        if not raw: continue
+                        if not raw:
+                            continue
                         try:
                             msg = json.loads(raw)
                         except Exception:
                             continue
-                        # Process PRICE messages
-                        if msg.get("type") != "PRICE": continue
-                        instr = msg.get("instrument")
-                        bids = msg.get("bids", []); asks = msg.get("asks", [])
-                        if bids and asks:
+                        if msg.get('type') == 'PRICE':
                             try:
-                                bid = float(bids[0]["price"]); ask = float(asks[0]["price"])
-                                mid = (bid + ask) / 2.0
-                            except Exception:
-                                continue
-                        else:
-                            continue
-                        time_iso = msg.get("time")
-                        try:
-                            t_dt = datetime.fromisoformat(time_iso.replace("Z","+00:00"))
-                        except Exception:
-                            t_dt = datetime.utcnow()
-                        # broadcast tick
-                        await broadcast({"type":"tick","instrument":instr,"price":mid,"time":time_iso})
-                        # aggregate to M1 and process
-                        if instr in aggs:
-                            prev = aggs[instr].add_tick(mid, t_dt)
-                            if prev:
-                                ind_m1 = aggs[instr].finalize_m1(prev)
-                                # compute m5 indicators approx if available
-                                m5_ind = None
-                                if len(aggs[instr].m5_history) >= 1:
-                                    try:
-                                        last5 = list(aggs[instr].m1_history)[-5:]
-                                        tmp = Indicators()
-                                        for c in last5:
-                                            tmp.update_with_candle(c['open'], c['high'], c['low'], c['close'])
-                                        m5_ind = tmp.compute_basic()
-                                    except Exception:
+                                t_iso = msg.get('time')
+                                t_dt = datetime.fromisoformat(t_iso.replace('Z', '+00:00'))
+                                bids = msg.get('bids', []); asks = msg.get('asks', [])
+                                if bids and asks:
+                                    bid = float(bids[0]['price']); ask = float(asks[0]['price'])
+                                    mid = (bid + ask) / 2.0
+                                elif bids:
+                                    mid = float(bids[0]['price'])
+                                elif asks:
+                                    mid = float(asks[0]['price'])
+                                else:
+                                    continue
+                                instr = msg.get('instrument')
+                                # broadcast tick (optional for clients)
+                                await broadcast({'type': 'tick', 'instrument': instr, 'price': mid, 'time': t_iso})
+                                # update aggregator
+                                if instr in aggs:
+                                    prev = aggs[instr].add_tick(mid, t_dt)
+                                    if prev:
+                                        # finalize m1 candle (CANDLE CLOSE occurred)
+                                        ind_m1 = aggs[instr].finalize_m1(prev)  # indicators at M1 close
+                                        # compute M5 indicators approx
                                         m5_ind = None
-                                structure = aggs[instr].get_structure()
-                                prev_m1 = list(aggs[instr].m1_history)[-2] if len(aggs[instr].m1_history) >= 2 else None
-                                sig = signal_from_indicators(instr, prev, ind_m1, m5_ind, structure, prev_m1)
-                                state = {"symbol": instr, "candle": prev, "indicators": ind_m1, "signal": sig, "time": time_iso}
-                                symbol_state[instr] = state
-                                await broadcast({"type":"candle","data":state})
-                                if sig:
-                                    signal_history.appendleft(state)
-                                    # send telegram async
-                                    asyncio.create_task(send_telegram(instr, sig, state))
+                                        if len(aggs[instr].m5_history) >= 1:
+                                            try:
+                                                last5 = aggs[instr].m1_history and list(aggs[instr].m1_history)[-5:]
+                                                tmp_inds = Indicators()
+                                                for c in last5:
+                                                    tmp_inds.update_with_candle(c['open'], c['high'], c['low'], c['close'])
+                                                m5_ind = tmp_inds.compute_basic()
+                                            except Exception:
+                                                m5_ind = None
+                                        structure = aggs[instr].get_structure()
+                                        prev_m1 = list(aggs[instr].m1_history)[-2] if len(aggs[instr].m1_history) >= 2 else None
+                                        # Generate candle-close signal
+                                        sig = signal_from_indicators(instr, prev, ind_m1, m5_ind, structure, prev_m1)
+                                        state = {'symbol': instr, 'candle': prev, 'indicators': ind_m1, 'signal': sig, 'time': t_iso}
+                                        symbol_state[instr] = state
+                                        # broadcast candle close update
+                                        await broadcast({'type': 'candle', 'data': state})
+                                        if sig:
+                                            # add to history and send telegram
+                                            signal_history.appendleft(state)
+                                            asyncio.create_task(send_telegram(instr, sig, state))
+                            except Exception as e:
+                                print("processing error:", e)
+                                traceback.print_exc()
+                                continue
         except Exception as e:
-            print("Stream connection error:", repr(e))
+            print("Stream connection error:", e)
             traceback.print_exc()
             await asyncio.sleep(backoff)
             backoff = min(backoff*2, 60)
             continue
 
 # -----------------------
-# API and WebSocket
+# API endpoints & websocket
 # -----------------------
 @app.middleware("http")
 async def autostart_middleware(request: Request, call_next):
@@ -398,50 +436,52 @@ async def autostart_middleware(request: Request, call_next):
         print(">>> AUTO START STREAM (middleware triggered)")
         if stream_task is None:
             stream_task = asyncio.create_task(oanda_stream_worker())
-    response = await call_next(request)
-    return response
+    return await call_next(request)
 
-@app.websocket("/ws")
+@app.websocket('/ws')
 async def ws_endpoint(ws: WebSocket):
     await ws.accept()
     clients.add(ws)
     try:
-        await ws.send_text(json.dumps({"type":"welcome","instruments":INSTRUMENTS}))
+        await ws.send_text(json.dumps({'type': 'welcome', 'instruments': INSTRUMENTS}))
         while True:
             try:
                 txt = await ws.receive_text()
-                if txt == "ping": await ws.send_text("pong")
+                if txt == 'ping':
+                    await ws.send_text('pong')
             except WebSocketDisconnect:
                 break
     finally:
         clients.discard(ws)
 
-@app.get("/", response_class=HTMLResponse)
-def home():
-    return HTMLResponse("<h3>Realtime OANDA Stream — Premium</h3><p>WS: /ws — Signals: /signals — Candles: /candles?symbol=EUR_USD&limit=50</p>")
+@app.get('/', response_class=HTMLResponse)
+async def home():
+    html = "<h3>Realtime OANDA Stream — Candle-Close Signals</h3><p>WS: /ws — Signals: /signals — Candles: /candles?symbol=EUR_USD&limit=50</p>"
+    return HTMLResponse(html)
 
-@app.get("/signals")
+@app.get('/signals')
 def get_signals():
+    # return recent signal history (most-recent-first)
     return JSONResponse(list(signal_history))
 
-@app.get("/candles")
+@app.get('/candles')
 def get_candles(symbol: str = "EUR_USD", limit: int = 100):
     if symbol not in aggs:
-        return JSONResponse({"error":"unknown symbol"}, status_code=400)
+        return JSONResponse({'error': 'unknown symbol'}, status_code=400)
     m1 = list(aggs[symbol].m1_history)[-limit:]
     m5 = list(aggs[symbol].m5_history)[-max(1, int(limit/5)):]
-    return JSONResponse({"m1": m1, "m5": m5})
+    return JSONResponse({'m1': m1, 'm5': m5})
 
-@app.get("/start")
-async def manual_start():
+@app.get('/start')
+async def start_stream():
     global stream_task
     if stream_task and not stream_task.done():
-        return {"status":"already_running"}
+        return {'status': 'already_running'}
     stream_task = asyncio.create_task(oanda_stream_worker())
-    return {"status":"started"}
+    return {'status': 'started'}
 
-@app.get("/stop")
-async def manual_stop():
+@app.get('/stop')
+async def stop_stream():
     global stream_task
     if stream_task:
         stream_task.cancel()
@@ -450,11 +490,11 @@ async def manual_stop():
         except asyncio.CancelledError:
             pass
         stream_task = None
-    return {"status":"stopped"}
+    return {'status': 'stopped'}
 
 # -----------------------
-# Run locally
+# local run
 # -----------------------
-if __name__ == "__main__":
+if __name__ == '__main__':
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
+    uvicorn.run('main:app', host='0.0.0.0', port=int(os.getenv('PORT', 8000)))
