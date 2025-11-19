@@ -1,20 +1,18 @@
 services:
   - type: web
-    name: oanda-signal-bot
+    name: oanda-realtime-signal-bot
     env: python
-    plan: free
+    region: singapore
     buildCommand: "pip install -r requirements.txt"
-    startCommand: "uvicorn main:app --host 0.0.0.0 --port 10000"
+    startCommand: "uvicorn main:app --host 0.0.0.0 --port $PORT"
     envVars:
       - key: OANDA_TOKEN
         sync: false
       - key: OANDA_ACCOUNT
         sync: false
-      - key: OANDA_STREAM_BASE
-        value: https://stream-fxpractice.oanda.com
-      - key: INSTRUMENTS
-        value: EUR_USD,GBP_USD,USD_JPY,USD_CAD,AUD_USD,USD_CHF
       - key: TIMEFRAME
-        value: M1
+        value: "M1"
       - key: MIN_CONFIDENCE
         value: "85"
+      - key: INSTRUMENTS
+        value: "EUR_USD,GBP_USD,USD_JPY,USD_CAD,AUD_USD,USD_CHF"

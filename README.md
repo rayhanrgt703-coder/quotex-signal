@@ -1,46 +1,43 @@
-# Real-Time OANDA Forex Signal Bot (Render.com Ready)
+# OANDA Real-Time Multi-Pair Signal Bot
 
-This project streams real-time Forex prices from OANDA and generates:
-- 🔥 Candlestick Pattern Signals  
-- 📊 RSI  
-- 🎯 Bollinger Bands  
-- 📈 Moving Average  
-- 📉 MACD  
-- 🎯 Confidence-based filtered signals (85–98%)
+This project streams real-time market price data from OANDA and generates
+high-confidence BUY/SELL signals using:
 
-Works with:  
-`EUR_USD`, `GBP_USD`, `USD_JPY`, `USD_CAD`, `AUD_USD`, `USD_CHF`
+- 20+ Candlestick Patterns
+- RSI
+- MACD
+- Bollinger Bands
+- SMA20
+- Trend Structure (HH, HL, LH, LL)
+
+### Supported Pairs
+EUR_USD  
+GBP_USD  
+USD_JPY  
+USD_CAD  
+AUD_USD  
+USD_CHF  
+
+### Timeframe
+M1 (1-minute candles)
 
 ---
 
-## 🚀 How to Deploy on Render.com
+## 🚀 Deploy on Render.com
 
-### 1️⃣ Upload ZIP (containing main.py, requirements.txt, render.yaml, static/index.html)
+1. Upload the project (main.py + requirements.txt + render.yaml + README.md)
+2. Go to https://dashboard.render.com
+3. Click “New Web Service”
+4. Connect your GitHub repo
+5. Render will auto-read `render.yaml`
+6. Add Environment Variables:
 
-### 2️⃣ Add Environment Variables:
-Go to:  
-**Render Dashboard → Your Web Service → Environment → Add Env Vars**
+- **OANDA_TOKEN**
+- **OANDA_ACCOUNT**
 
-
-You will see live real-time signals updating automatically via WebSocket.
+Then click Deploy.
 
 ---
 
 ## ▶ Run Locally
 
-
----
-
-## 📡 Features
-
-✔ Real-Time OANDA live price streaming  
-✔ Multi-pair candle generation  
-✔ Full candlestick pattern detection  
-✔ RSI + BB + MA + MACD indicators  
-✔ High-confidence signals (85–98%)  
-✔ WebSocket-based live table  
-✔ Cloud deploy ready (Render.com)
-
----
-
-If TA-Lib causes installation issues on Render, contact me for a TA-Lib-free version.
